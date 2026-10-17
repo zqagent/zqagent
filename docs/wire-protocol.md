@@ -1,5 +1,7 @@
 # 线协议 v1（帧 · 信封 · 消息）
 
+**简体中文** · [English](en/wire-protocol.md)
+
 本文件是 zqagent 新通讯底座（Rust 网关 + 纯 Node 节点 + web/小程序/App 终端）的**规范性契约**。
 权威 schema 见 [`proto/fleet.proto`](../proto/fleet.proto)；三方实现与交叉向量见 §7。
 
@@ -71,8 +73,8 @@ sig = HMAC-SHA256(fleetSecret, encode(Envelope_without_sig))
 | 其余控制/写操作 | 10s |
 | 节点离线 | **不等待**，立即回 `ok=false`（`error` 含「离线」） |
 
-分级语义沿用原 Hub 代理时期的约定（`isSlowCmd`/`cmdTimeoutMsFor`，现位于网关
-`gateway/src/`）：慢指令超时只让本次请求失败，不据此判定节点僵死。
+分级语义沿用原 Hub 代理时期的约定（`isSlowCmd`/`cmdTimeoutMsFor`，现由网关实现，
+网关不在本仓库）：慢指令超时只让本次请求失败，不据此判定节点僵死。
 
 ## 3. 帧类型
 
@@ -112,8 +114,8 @@ sig = HMAC-SHA256(fleetSecret, encode(Envelope_without_sig))
 | `NodeState` | `bytes detail = 7` | 网关转发放大节点的 `Info.detail` | 订阅后一次拿到项目/统计，替代 retained info |
 
 > `NodeState.detail` **只在 `SNAPSHOT` 里填**：`STATUS` 是高频扇出路径，每次状态变化都带上
-> 整段 info JSON 会白白放大流量。两条路径分别走 `gateway/src/registry.rs` 的
-> `to_proto_snapshot()` 与 `to_proto()`。
+> 整段 info JSON 会白白放大流量。网关侧的两条路径分别由 `to_proto_snapshot()` 与
+> `to_proto()` 产出。
 
 字段号选择遵守 §8 的纪律：`Event`/`Notify`/`NodeState` 的既有字段是 1..6，新字段一律取 7。
 
@@ -127,8 +129,8 @@ sig = HMAC-SHA256(fleetSecret, encode(Envelope_without_sig))
 | 缓冲淘汰 | **优先淘汰** | **优先保留**（缓冲满时先淘汰最老的 EVENT） |
 
 两者共用同一个环形缓冲，因此一次 `resume(since)` 就能把事件与通知一并补齐——
-审批请求不会因为之后的事件风暴而被挤掉（见 `gateway/src/eventbuf.rs` 的
-`notifies_survive_event_storm` 测试）。
+审批请求不会因为之后的事件风暴而被挤掉（网关侧有 `notifies_survive_event_storm`
+测试覆盖该行为）。
 
 ## 3.1 指令路由语义（M2b）
 
@@ -219,8 +221,8 @@ HTTP 可观测端点（`/healthz`、`/metrics`）与 `/ws` 共用同一端口，
 | --- | --- | --- |
 | JS/TS（Node + 浏览器 + 小程序） | `packages/shared/src/wire/` | 可移植：`Uint8Array`/`DataView`，**不依赖任何 Node API** |
 | Node 签名 | `packages/shared/src/wire/node.ts` | `node:crypto`，仅 Node 侧使用（不进浏览器包） |
-| Rust | `gateway/`（crate `zqagent-gateway`） | `prost` + 手写帧编解码；连接层见 `frame/stream/auth/registry/eventbuf` |
-| 连接层 | `gateway/src/main.rs` | wss 终结、握手、心跳、快照、扇出、`/healthz`、`/metrics` |
+| Rust 网关（不在本仓库） | crate `zqagent-gateway` | `prost` + 手写帧编解码；模块划分为 `frame/stream/auth/registry/eventbuf` |
+| 连接层（不在本仓库） | 网关 `main` | wss 终结、握手、心跳、快照、扇出、`/healthz`、`/metrics` |
 
 **交叉向量**：[`proto/fixtures/wire-vectors.json`](../proto/fixtures/wire-vectors.json)（提交入库）保存
 规范输入与其期望字节。Node 与 Rust 两侧都必须能**编码出完全相同的字节**并**解码回相同语义**。

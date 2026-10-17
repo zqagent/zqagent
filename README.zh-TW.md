@@ -141,6 +141,9 @@ ZQAgent 的前提是**模型輸出不可信**：
 
 使用者導向的指南（安裝、CLI 用法、Agent、MCP）：<https://agent.cd-zq.com/>
 
+架構與線協議另有英文版：[docs/en/architecture.md](./docs/en/architecture.md) ·
+[docs/en/wire-protocol.md](./docs/en/wire-protocol.md)
+
 ## 開發
 
 ```bash
