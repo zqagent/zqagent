@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="376" viewBox="0 0 760 376" role="img" aria-label="zqagent CLI 帮助输出">
+  <rect width="760" height="376" rx="12" fill="#0d1117"/>
+  <rect width="760" height="40" rx="12" fill="#161b22"/>
+  <rect y="28" width="760" height="12" fill="#161b22"/>
+  <circle cx="22" cy="20" r="6" fill="#ff5f57"/>
+  <circle cx="44" cy="20" r="6" fill="#febc2e"/>
+  <circle cx="66" cy="20" r="6" fill="#28c840"/>
+  <text x="380" y="25" fill="#8b949e" font-size="12" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">zqagent</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Noto Sans Mono CJK SC', monospace" font-size="14"><tspan x="26" y="78" fill="#a5b4fc">ZQAgent CLI v0.2.3</tspan><tspan x="26" y="100" fill="#e5e7eb"> </tspan><tspan x="26" y="122" fill="#e5e7eb">用法：</tspan><tspan x="26" y="144" fill="#9ca3af">  zqagent                        交互式会话（默认）</tspan><tspan x="26" y="166" fill="#9ca3af">  zqagent serve [选项]           以 headless 方式常驻为可被 Hub 管理的节点</tspan><tspan x="26" y="188" fill="#9ca3af">  zqagent update [--status|--check|--now|--rollback]</tspan><tspan x="26" y="210" fill="#9ca3af">                                 查看/手动触发节点自动更新</tspan><tspan x="26" y="232" fill="#9ca3af">  zqagent link --hub &lt;url&gt; --code &lt;接入码&gt; [--label 名称]</tspan><tspan x="26" y="254" fill="#9ca3af">                                 把本机节点接入 Hub（本机有 server 时热接入）</tspan><tspan x="26" y="276" fill="#e5e7eb"> </tspan><tspan x="26" y="298" fill="#e5e7eb">serve 选项：--port &lt;n&gt;  --host &lt;addr&gt;  --data-dir &lt;dir&gt;</tspan><tspan x="26" y="320" fill="#9ca3af">            --hub &lt;url&gt; --enroll-code &lt;码&gt; --label &lt;名称&gt;   （启动即接入）</tspan><tspan x="26" y="342" fill="#e5e7eb">其它选项：--resume &lt;会话ID&gt;   --debug   --help/-h   --version/-v</tspan></g>
+</svg>

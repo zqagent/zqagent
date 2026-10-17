@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "esnext", // node 环境支持 esnext
+    "module": "node16",
+    "moduleResolution": "node16",
+    "esModuleInterop": true,
+    "strict": true,
+    "outDir": "./dist",
+    "declaration": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@zqagent/shared": ["../shared/src/index.ts"],
+      "@zqagent/shared/notify": ["../shared/src/notify/index.ts"],
+      "@zqagent/shared/wire": ["../shared/src/wire/index.ts"],
+      "@zqagent/shared/*": ["../shared/src/*.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

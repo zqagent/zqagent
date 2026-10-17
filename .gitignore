@@ -1,0 +1,18 @@
+node_modules/
+dist/
+release/
+
+# 本地密钥与运行时数据
+.env
+.env.local
+.env.*.local
+.npmrc
+.zqagent_data/
+data/
+*.pem
+*.key
+
+# 构建/工具产物
+*.tsbuildinfo
+coverage/
+.DS_Store

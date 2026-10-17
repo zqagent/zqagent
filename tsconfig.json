@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "node16",
+    "moduleResolution": "node16",
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@zqagent/shared": ["packages/shared/src/index.ts"],
+      "@zqagent/shared/notify": ["packages/shared/src/notify/index.ts"],
+      // wire 是目录模块（src/wire/index.ts），通配 `*` 匹配不到，需显式映射
+      "@zqagent/shared/wire": ["packages/shared/src/wire/index.ts"],
+      "@zqagent/shared/*": ["packages/shared/src/*.ts"]
+    }
+  }
+}

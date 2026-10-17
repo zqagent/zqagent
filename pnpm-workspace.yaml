@@ -1,0 +1,6 @@
+packages:
+  - "packages/*"
+
+# 允许运行构建脚本的依赖（esbuild 供 tsup/vite 使用）
+allowBuilds:
+  esbuild: true

@@ -1,0 +1,213 @@
+// zqagent 线协议 v1（帧 + 信封 + 消息）契约
+//
+// 规范说明见 docs/wire-protocol.md。本文件是三方（Rust / Node / 浏览器·小程序）
+// 编解码的唯一权威来源，改动必须同步三份实现并重跑交叉向量测试。
+//
+// 兼容纪律：
+//   1) 已发布的字段号永不复用、永不改类型；
+//   2) 字段只增不改，删除用 reserved；
+//   3) proto3 默认值不进线（prost 与手写实现行为必须一致）。
+syntax = "proto3";
+
+package zqagent.wire.v1;
+
+// ---------------------------------------------------------------------------
+// 信封：控制台/网关 → 节点 的指令载体，与现有 FleetCmdEnvelope 字段语义一致
+// ---------------------------------------------------------------------------
+message Envelope {
+  uint64 t = 1;          // 毫秒时间戳（±60s 窗口，防重放）
+  string nonce = 2;      // 一次性随机串（防重放）
+  string req_id = 3;     // 请求 ID（回执关联）
+  string type = 4;       // 指令类型（沿用 FleetCmdType 字符串，便于演进）
+  string client_id = 5;  // 发起方实例 ID
+  string node_id = 6;    // 目标节点 ID
+  string project_id = 7; // 可选：项目级
+  string session_id = 8; // 可选：会话级
+  bytes payload = 9;     // 载荷字节：按 type 选择「强类型消息」或「JSON 字节」（M2+ 逐步强类型化）
+  /**
+   * 执行预算（毫秒，可选）：由发起方指定，网关据此决定等待回执的上限。
+   *
+   * 放在信封里而不是塞进 opaque 的 `payload`，是为了让网关**无需解析载荷**即可分级超时；
+   * 0 表示按 `type` 的默认分级（见 docs/wire-protocol.md §5.2）。
+   */
+  uint32 timeout_ms = 10;
+  /**
+   * HMAC-SHA256 原始 32 字节，覆盖字段 1..10 的编码字节。
+   *
+   * **必须保持为最后一个字段**：这样 `encode(env, sig 清空)` 即签名字节（也为带签名编码的前缀）。
+   */
+  bytes sig = 11;
+}
+
+// ---------------------------------------------------------------------------
+// 上行：节点 → 网关
+// ---------------------------------------------------------------------------
+
+// 在线状态。替代 MQTT retained + LWT：由网关持有权威状态，离线判定改为
+// 「socket 关闭 或 心跳超时」。
+message Status {
+  string node_id = 1;
+  bool online = 2;
+  uint64 ts = 3;      // 毫秒时间戳（现有 JSON 协议的 ISO 字符串在 M2 映射）
+  string label = 4;
+  string platform = 5;
+  string mode = 6;
+  string version = 7;
+  string ip = 8;
+}
+
+// 实时事件。seq 单调递增，用于去重与断线续传定位。
+message Event {
+  uint64 seq = 1;
+  uint64 ts = 2;
+  string type = 3;
+  string project_id = 4;
+  string session_id = 5;
+  bytes data = 6;    // 事件体（JSON 字节，M2+ 可按 type 强类型化）
+  /**
+   * 事件来源节点。
+   *
+   * 由**网关**按连接绑定的 nodeId 填充（节点上行时留空，省一次冗余编码）；下行扇出
+   * 与跨副本广播用的都是填充后的帧。终端面一条连接可订阅多个节点（小程序 ≤5 连接），
+   * 没有这个字段就无法分辨事件来自哪台节点 —— 它是「单连接多路复用」的必要条件。
+   */
+  string node_id = 7;
+}
+
+// 节点能力/项目快照（M2b）。
+//
+// 只做**摘要计数**：完整项目列表由 `list_projects` 指令按需拉取（它本就在指令类型里），
+// 避免每次心跳都传输整棵项目树。
+message Info {
+  string node_id = 1;
+  string platform = 2;
+  string version = 3;
+  string ip = 4;
+  uint32 projects = 5;   // 项目数
+  uint32 sessions = 6;   // 会话数
+  uint32 running = 7;    // 运行中的会话数
+  uint32 waiting = 8;    // 等待审批/提问的会话数
+  uint64 ts = 9;         // 毫秒时间戳
+  // 节点上报的**原始 info JSON**（含 label / 项目明细 / stats / usage 等富字段）。
+  //
+  // 计数类字段（5..8）供网关快速聚合与查询；富字段原样透传，避免为控制面视图
+  // 反复演进 schema。INFO 是低频上行（默认 5 分钟 + 状态变化时），
+  // 体积与原先 MQTT retained info 相同——**它替换的就是那条 retained 消息**。
+  //
+  // 控制面（Hub）经网关 HTTP 端点读取本字段，从前的 MQTT retained info 因此可退场。
+  bytes detail = 10;
+}
+
+// 节点通知（M2c）：需要**可靠送达**的上行（审批请求 / 提问 / 回合完成 / 错误）。
+//
+// 与 `Event` 的分工：`Event` 是高频实时进度（丢了可容忍，靠 seq 续传补），
+// `Notify` 是低频但重要（审批/提问挂起必须让终端看到），因此：
+//   - 与 Event **共用同一个 seq 游标与环形缓冲**，保证 resume 时两者都能回放；
+//   - 缓冲淘汰时优先保留 Notify（见 gateway/src/eventbuf.rs）。
+message Notify {
+  uint64 seq = 1;        // 由网关分配的游标（节点上报时留 0）
+  uint64 ts = 2;         // 毫秒时间戳
+  string kind = 3;       // approval_request | question_asked | turn_completed | error | ...
+  string project_id = 4;
+  string session_id = 5;
+  bytes data = 6;        // 通知体（JSON 字节：审批/提问详情等）
+  // 通知来源节点；同 `Event.node_id`，由网关填充（多路复用终端据此归属到具体节点）。
+  string node_id = 7;
+}
+
+// ---------------------------------------------------------------------------
+// 指令回执：节点 → 网关
+// ---------------------------------------------------------------------------
+
+// 回执。语义等价现有 FleetAckPayload；ip 无字段，因为无需 clientId 定向——
+// 连接本身已绑定 node_id 与请求方。
+message Ack {
+  string req_id = 1;
+  string type = 2;
+  bool ok = 3;
+  string error = 4;
+  bytes data = 5;    // 按 type 的结果（JSON 或强类型字节）
+}
+
+// ---------------------------------------------------------------------------
+// 握手 / 认证（M2）
+// ---------------------------------------------------------------------------
+
+// 连接建立后的第一帧载荷。必须在任何业务帧之前通过。
+//
+// `token` 是**最后一个字段**：签名字节 = `encode(Auth 去掉 token)`，因此
+// 它同时是带 token 编码的前缀（与 Envelope.sig 同一约定，校验方可重编码比对）。
+message Auth {
+  string id = 1;      // 节点面：nodeId；终端面：userId
+  uint64 ts = 2;      // 毫秒时间戳（节点面与 expires=0 的终端面走 ±60s 窗口）
+  string nonce = 3;   // 一次性随机串
+  uint32 proto = 4;   // 协议能力版本（当前 1）
+  string kind = 5;    // "node" | "terminal"
+  string client = 6;  // 终端载体："web" | "miniapp" | "app"（节点面留空）
+  bytes token = 7;    // 节点面 = HMAC-SHA256(fleetSecret, encode(Auth 去 token))；
+                      // 终端面 = HMAC-SHA256(terminalSecret, encode(Auth 去 token))
+  /**
+   * 终端面：本令牌被授权的 nodeId 列表（由控制面签发时填入）。
+   *
+   * **fail closed**：非空时网关严格校验 subscribe/cmd 的 nodeId ∈ scope，越权拒绝。
+   * 空表示「不限制」——仅供节点面与旧版客户端，终端面不应为空。
+   */
+  repeated string scope = 8;
+  /**
+   * 终端面：令牌过期时刻（毫秒）。>0 时网关校验 `now < expires` 并**跳过 ±60s 新鲜度窗口**。
+   *
+   * 跳过窗口是必要的：终端令牌由控制面按小时级有效期签发，若仍要求 ts 落在 ±60s 内，
+   * 每次重连都得回控制面换令牌——那等于把控制面变成网关的硬依赖。
+   * 节点面留 0（沿用 ±60s）。
+   */
+  uint64 expires = 9;
+}
+
+message AuthOk {
+  bool ok = 1;
+  string error = 2;   // ok=false 时的原因（用于客户端排查）
+  uint64 server_ts = 3;
+}
+
+// ---------------------------------------------------------------------------
+// 快照与订阅（M2）
+// ---------------------------------------------------------------------------
+
+// 节点状态快照。连接建立后由网关首推，**替代 MQTT retained 的重建视图语义**。
+message NodeState {
+  string node_id = 1;
+  bool online = 2;
+  uint64 last_seen = 3;
+  string platform = 4;
+  string version = 5;
+  string ip = 6;
+  /**
+   * 节点上报的原始 info JSON（`Info.detail` 的转发）。
+   *
+   * 快照要能**替代 MQTT retained info**：终端订阅后一次拿到项目/统计，而不是逐个节点
+   * 发指令去问。INFO 是低频上行，体积与原先那条 retained 消息相同。
+   * 节点从未上报过 INFO 时为空（proto3 默认值不进线）。
+   */
+  bytes detail = 7;
+}
+
+// snapshot：终端面为订阅范围内的状态快照；节点面为空（节点只需知道已就绪）。
+message Snapshot {
+  repeated NodeState nodes = 1;
+  uint64 seq = 2;     // 当前事件游标，客户端据此发起 resume
+}
+
+// 终端多路复用订阅（一条连接管理多个节点；小程序 ≤5 连接的平台约束）
+message Subscribe {
+  repeated string node_ids = 1;
+}
+
+message Unsubscribe {
+  repeated string node_ids = 1;
+}
+
+// 断线续传：客户端带上次收到的游标，网关回放其后的缓冲
+message Resume {
+  uint64 since = 1;
+}
+

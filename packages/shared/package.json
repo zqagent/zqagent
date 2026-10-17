@@ -1,0 +1,69 @@
+{
+  "name": "@zqagent/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "core 与 hub 共用的基础模块：节点管理协议、凭据加密、审批视图、通知渠道",
+  "author": "成都志前科技有限公司",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./fleet": {
+      "types": "./dist/fleet.d.ts",
+      "import": "./dist/fleet.js",
+      "require": "./dist/fleet.cjs"
+    },
+    "./secrets": {
+      "types": "./dist/secrets.d.ts",
+      "import": "./dist/secrets.js",
+      "require": "./dist/secrets.cjs"
+    },
+    "./approval-view": {
+      "types": "./dist/approval-view.d.ts",
+      "import": "./dist/approval-view.js",
+      "require": "./dist/approval-view.cjs"
+    },
+    "./llm-presets": {
+      "types": "./dist/llm-presets.d.ts",
+      "import": "./dist/llm-presets.js",
+      "require": "./dist/llm-presets.cjs"
+    },
+    "./hub-api": {
+      "types": "./dist/hub-api.d.ts",
+      "import": "./dist/hub-api.js",
+      "require": "./dist/hub-api.cjs"
+    },
+    "./notify": {
+      "types": "./dist/notify/index.d.ts",
+      "import": "./dist/notify/index.js",
+      "require": "./dist/notify/index.cjs"
+    },
+    "./wire": {
+      "types": "./dist/wire/index.d.ts",
+      "import": "./dist/wire/index.js",
+      "require": "./dist/wire/index.cjs"
+    },
+    "./wire/node": {
+      "types": "./dist/wire/node.d.ts",
+      "import": "./dist/wire/node.js",
+      "require": "./dist/wire/node.cjs"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "nodemailer": "^10.0.16"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@types/nodemailer": "^8.0.2",
+    "tsup": "^8.5.1",
+    "typescript": "^5.6.0"
+  }
+}

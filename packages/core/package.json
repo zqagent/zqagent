@@ -1,0 +1,217 @@
+{
+  "name": "@zqagent/core",
+  "version": "0.2.3",
+  "description": "TypeScript agent engine core — TurnEngine, ToolRegistry, PermissionEngine, OpenAI provider with 18 built-in tools",
+  "author": "成都志前科技有限公司",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "zqagent": "./bin/zqagent"
+  },
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./server": {
+      "import": {
+        "types": "./dist/server/index.d.ts",
+        "default": "./dist/server/index.js"
+      },
+      "require": {
+        "types": "./dist/server/index.d.cts",
+        "default": "./dist/server/index.cjs"
+      }
+    },
+    "./tools/fs": {
+      "import": {
+        "types": "./dist/tools/files.d.ts",
+        "default": "./dist/tools/files.js"
+      },
+      "require": {
+        "types": "./dist/tools/files.d.cts",
+        "default": "./dist/tools/files.cjs"
+      }
+    },
+    "./tools/shell": {
+      "import": {
+        "types": "./dist/tools/shell.d.ts",
+        "default": "./dist/tools/shell.js"
+      },
+      "require": {
+        "types": "./dist/tools/shell.d.cts",
+        "default": "./dist/tools/shell.cjs"
+      }
+    },
+    "./tools/search": {
+      "import": {
+        "types": "./dist/tools/search.d.ts",
+        "default": "./dist/tools/search.js"
+      },
+      "require": {
+        "types": "./dist/tools/search.d.cts",
+        "default": "./dist/tools/search.cjs"
+      }
+    },
+    "./tools/web": {
+      "import": {
+        "types": "./dist/tools/web.d.ts",
+        "default": "./dist/tools/web.js"
+      },
+      "require": {
+        "types": "./dist/tools/web.d.cts",
+        "default": "./dist/tools/web.cjs"
+      }
+    },
+    "./tools/git": {
+      "import": {
+        "types": "./dist/tools/git.d.ts",
+        "default": "./dist/tools/git.js"
+      },
+      "require": {
+        "types": "./dist/tools/git.d.cts",
+        "default": "./dist/tools/git.cjs"
+      }
+    },
+    "./tools/diff": {
+      "import": {
+        "types": "./dist/tools/diff.d.ts",
+        "default": "./dist/tools/diff.js"
+      },
+      "require": {
+        "types": "./dist/tools/diff.d.cts",
+        "default": "./dist/tools/diff.cjs"
+      }
+    },
+    "./tools/todo": {
+      "import": {
+        "types": "./dist/tools/todo.d.ts",
+        "default": "./dist/tools/todo.js"
+      },
+      "require": {
+        "types": "./dist/tools/todo.d.cts",
+        "default": "./dist/tools/todo.cjs"
+      }
+    },
+    "./tools/ask": {
+      "import": {
+        "types": "./dist/tools/ask.d.ts",
+        "default": "./dist/tools/ask.js"
+      },
+      "require": {
+        "types": "./dist/tools/ask.d.cts",
+        "default": "./dist/tools/ask.cjs"
+      }
+    },
+    "./tools/plan": {
+      "import": {
+        "types": "./dist/tools/plan.d.ts",
+        "default": "./dist/tools/plan.js"
+      },
+      "require": {
+        "types": "./dist/tools/plan.d.cts",
+        "default": "./dist/tools/plan.cjs"
+      }
+    },
+    "./tools/directories": {
+      "import": {
+        "types": "./dist/tools/directories.d.ts",
+        "default": "./dist/tools/directories.js"
+      },
+      "require": {
+        "types": "./dist/tools/directories.d.cts",
+        "default": "./dist/tools/directories.cjs"
+      }
+    },
+    "./tools/explore": {
+      "import": {
+        "types": "./dist/tools/explore.d.ts",
+        "default": "./dist/tools/explore.js"
+      },
+      "require": {
+        "types": "./dist/tools/explore.d.cts",
+        "default": "./dist/tools/explore.cjs"
+      }
+    },
+    "./tools/media": {
+      "import": {
+        "types": "./dist/tools/media.d.ts",
+        "default": "./dist/tools/media.js"
+      },
+      "require": {
+        "types": "./dist/tools/media.d.cts",
+        "default": "./dist/tools/media.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist/",
+    "bin/"
+  ],
+  "scripts": {
+    "dev": "tsx src/cli/index.ts",
+    "start": "tsx src/cli/index.ts",
+    "server": "tsx src/server/index.ts",
+    "build": "tsup",
+    "watch": "tsup --watch",
+    "build:sea": "tsup --config tsup.sea.config.ts",
+    "build:cli-bin": "node scripts/build_cli_binary.mjs",
+    "probes:sea": "node scripts/make_sea_probes.mjs",
+    "fetch:busybox": "node scripts/fetch_busybox_windows.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "chalk": "^5.6.2",
+    "cli-highlight": "^2.1.11",
+    "cli-table3": "^0.6.5",
+    "dotenv": "^16.4.0",
+    "markdown-it": "^15.0.2",
+    "node-emoji": "^2.2.0",
+    "node-fetch": "^2.7.0",
+    "nodemailer": "^10.0.16",
+    "openai": "^4.73.0",
+    "socks-proxy-agent": "^9.0.0",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@types/node-emoji": "^1.8.2",
+    "@types/node-fetch": "^2.6.13",
+    "@types/nodemailer": "^8.0.2",
+    "@types/ws": "^8.18.2",
+    "@zqagent/shared": "workspace:*",
+    "postject": "^1.0.0-alpha.6",
+    "tsup": "^8.5.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.10",
+    "zod": "^3.25.76"
+  },
+  "keywords": [
+    "ai-agent",
+    "llm",
+    "agent-engine",
+    "tool-use",
+    "openai",
+    "typescript"
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zqagent/zqagent.git"
+  },
+  "homepage": "https://github.com/zqagent/zqagent#readme"
+}

@@ -1,0 +1,372 @@
+{
+  "note": "线协议 v1 交叉验证向量。由 packages/core/scripts/gen_wire_vectors.ts 生成，勿手改。",
+  "spec": "docs/wire-protocol.md",
+  "proto": "proto/fleet.proto",
+  "protocolVersion": 1,
+  "secret": "zqagent-wire-test-secret",
+  "frames": [
+    {
+      "name": "cmd-ping-最小",
+      "typeName": "CMD",
+      "seq": 0,
+      "t": 1700000000000,
+      "nonce": "nonce-0001",
+      "reqId": "req-0001",
+      "type": "ping",
+      "clientId": "gw-replica-1",
+      "nodeId": "node-aaa",
+      "projectId": "",
+      "sessionId": "",
+      "timeoutMs": 0,
+      "payloadHex": "",
+      "signableHex": "0880d095ffbc31120a6e6f6e63652d303030311a087265712d30303031220470696e672a0c67772d7265706c6963612d3132086e6f64652d616161",
+      "sigHex": "816863ca3846862bd5c16c08a4cd5a156186202b404c7ebf1ac7b4799e6d0e92",
+      "envelopeHex": "0880d095ffbc31120a6e6f6e63652d303030311a087265712d30303031220470696e672a0c67772d7265706c6963612d3132086e6f64652d6161615a20816863ca3846862bd5c16c08a4cd5a156186202b404c7ebf1ac7b4799e6d0e92",
+      "frameHex": "5a5117005d0880d095ffbc31120a6e6f6e63652d303030311a087265712d30303031220470696e672a0c67772d7265706c6963612d3132086e6f64652d6161615a20816863ca3846862bd5c16c08a4cd5a156186202b404c7ebf1ac7b4799e6d0e92"
+    },
+    {
+      "name": "cmd-带项目与会话",
+      "typeName": "CMD",
+      "seq": 1234,
+      "t": 1700000001234,
+      "nonce": "n-2",
+      "reqId": "req-2",
+      "type": "submit_turn",
+      "clientId": "gw-replica-1",
+      "nodeId": "node-bbb",
+      "projectId": "p1",
+      "sessionId": "s1",
+      "timeoutMs": 0,
+      "payloadHex": "7b22696e707574223a22e4bda0e5a5bdefbc8ce4b896e7958c227d",
+      "signableHex": "08d2d995ffbc3112036e2d321a057265712d32220b7375626d69745f7475726e2a0c67772d7265706c6963612d3132086e6f64652d6262623a027031420273314a1b7b22696e707574223a22e4bda0e5a5bdefbc8ce4b896e7958c227d",
+      "sigHex": "aba603683f8b9288e145abeaa9ce87a9920603027cb6d256bc19a8e1ac8811a7",
+      "envelopeHex": "08d2d995ffbc3112036e2d321a057265712d32220b7375626d69745f7475726e2a0c67772d7265706c6963612d3132086e6f64652d6262623a027031420273314a1b7b22696e707574223a22e4bda0e5a5bdefbc8ce4b896e7958c227d5a20aba603683f8b9288e145abeaa9ce87a9920603027cb6d256bc19a8e1ac8811a7",
+      "frameHex": "5a5117d2097f08d2d995ffbc3112036e2d321a057265712d32220b7375626d69745f7475726e2a0c67772d7265706c6963612d3132086e6f64652d6262623a027031420273314a1b7b22696e707574223a22e4bda0e5a5bdefbc8ce4b896e7958c227d5a20aba603683f8b9288e145abeaa9ce87a9920603027cb6d256bc19a8e1ac8811a7"
+    },
+    {
+      "name": "cmd-空字符串可选字段被省略",
+      "typeName": "CMD",
+      "seq": 2000,
+      "t": 1700000002000,
+      "nonce": "",
+      "reqId": "",
+      "type": "",
+      "clientId": "",
+      "nodeId": "",
+      "projectId": "",
+      "sessionId": "",
+      "timeoutMs": 0,
+      "payloadHex": "",
+      "signableHex": "08d0df95ffbc31",
+      "sigHex": "cd487a2867abdd862e839aae78adb86cbae0345bb247ae0f459c11278b214a8d",
+      "envelopeHex": "08d0df95ffbc315a20cd487a2867abdd862e839aae78adb86cbae0345bb247ae0f459c11278b214a8d",
+      "frameHex": "5a5117d00f2908d0df95ffbc315a20cd487a2867abdd862e839aae78adb86cbae0345bb247ae0f459c11278b214a8d"
+    },
+    {
+      "name": "cmd-二进制载荷（含 0x00 与高位字节）",
+      "typeName": "CMD",
+      "seq": 3000,
+      "t": 1700000003000,
+      "nonce": "n-4",
+      "reqId": "req-4",
+      "type": "read_file",
+      "clientId": "gw-replica-2",
+      "nodeId": "node-ccc",
+      "projectId": "",
+      "sessionId": "",
+      "timeoutMs": 0,
+      "payloadHex": "00ff10fe7f0080abcd",
+      "signableHex": "08b8e795ffbc3112036e2d341a057265712d342209726561645f66696c652a0c67772d7265706c6963612d3232086e6f64652d6363634a0900ff10fe7f0080abcd",
+      "sigHex": "fc98296fedc484cdc9ecb628fd8cc6e10221f24557684e0e9fbb8cc64fbc1a14",
+      "envelopeHex": "08b8e795ffbc3112036e2d341a057265712d342209726561645f66696c652a0c67772d7265706c6963612d3232086e6f64652d6363634a0900ff10fe7f0080abcd5a20fc98296fedc484cdc9ecb628fd8cc6e10221f24557684e0e9fbb8cc64fbc1a14",
+      "frameHex": "5a5117b8176308b8e795ffbc3112036e2d341a057265712d342209726561645f66696c652a0c67772d7265706c6963612d3232086e6f64652d6363634a0900ff10fe7f0080abcd5a20fc98296fedc484cdc9ecb628fd8cc6e10221f24557684e0e9fbb8cc64fbc1a14"
+    },
+    {
+      "name": "cmd-UTF8边界（emoji 与多字节）",
+      "typeName": "CMD",
+      "seq": 4000,
+      "t": 1700000004000,
+      "nonce": "n-5-🔒",
+      "reqId": "req-5",
+      "type": "run_command",
+      "clientId": "gw-replica-3",
+      "nodeId": "node-ddd",
+      "projectId": "",
+      "sessionId": "",
+      "timeoutMs": 0,
+      "payloadHex": "7b22636f6d6d616e64223a226563686f20e29c8520e4b8ade6968720f09f9a80227d",
+      "signableHex": "08a0ef95ffbc3112086e2d352df09f94921a057265712d35220b72756e5f636f6d6d616e642a0c67772d7265706c6963612d3332086e6f64652d6464644a227b22636f6d6d616e64223a226563686f20e29c8520e4b8ade6968720f09f9a80227d",
+      "sigHex": "6659ae84da79c4f29b3845924dd8ae110bf3cae62ad903757ba99bce040c7041",
+      "envelopeHex": "08a0ef95ffbc3112086e2d352df09f94921a057265712d35220b72756e5f636f6d6d616e642a0c67772d7265706c6963612d3332086e6f64652d6464644a227b22636f6d6d616e64223a226563686f20e29c8520e4b8ade6968720f09f9a80227d5a206659ae84da79c4f29b3845924dd8ae110bf3cae62ad903757ba99bce040c7041",
+      "frameHex": "5a5117a01f830108a0ef95ffbc3112086e2d352df09f94921a057265712d35220b72756e5f636f6d6d616e642a0c67772d7265706c6963612d3332086e6f64652d6464644a227b22636f6d6d616e64223a226563686f20e29c8520e4b8ade6968720f09f9a80227d5a206659ae84da79c4f29b3845924dd8ae110bf3cae62ad903757ba99bce040c7041"
+    },
+    {
+      "name": "cmd-带执行预算（timeout_ms）",
+      "typeName": "CMD",
+      "seq": 5000,
+      "t": 1700000005000,
+      "nonce": "n-6",
+      "reqId": "req-6",
+      "type": "run_command",
+      "clientId": "gw-replica-1",
+      "nodeId": "node-eee",
+      "projectId": "",
+      "sessionId": "",
+      "timeoutMs": 120000,
+      "payloadHex": "7b22636f6d6d616e64223a22736c6565702035227d",
+      "signableHex": "0888f795ffbc3112036e2d361a057265712d36220b72756e5f636f6d6d616e642a0c67772d7265706c6963612d3132086e6f64652d6565654a157b22636f6d6d616e64223a22736c6565702035227d50c0a907",
+      "sigHex": "cf4c21b920070ddebaa7df78d1b97eb79f0cc1f6132244554c2b51965edc8577",
+      "envelopeHex": "0888f795ffbc3112036e2d361a057265712d36220b72756e5f636f6d6d616e642a0c67772d7265706c6963612d3132086e6f64652d6565654a157b22636f6d6d616e64223a22736c6565702035227d50c0a9075a20cf4c21b920070ddebaa7df78d1b97eb79f0cc1f6132244554c2b51965edc8577",
+      "frameHex": "5a51178827750888f795ffbc3112036e2d361a057265712d36220b72756e5f636f6d6d616e642a0c67772d7265706c6963612d3132086e6f64652d6565654a157b22636f6d6d616e64223a22736c6565702035227d50c0a9075a20cf4c21b920070ddebaa7df78d1b97eb79f0cc1f6132244554c2b51965edc8577"
+    }
+  ],
+  "handshakes": [
+    {
+      "name": "auth-节点面",
+      "id": "node-aaa",
+      "ts": 1700000000000,
+      "nonce": "auth-n-1",
+      "proto": 1,
+      "kind": "node",
+      "client": "",
+      "signableHex": "0a086e6f64652d6161611080d095ffbc311a08617574682d6e2d3120012a046e6f6465",
+      "tokenHex": "03dfcc4f179ffb8868f8a8e15230db9001b9741f9b26ead73f765c895486a43c",
+      "authHex": "0a086e6f64652d6161611080d095ffbc311a08617574682d6e2d3120012a046e6f64653a2003dfcc4f179ffb8868f8a8e15230db9001b9741f9b26ead73f765c895486a43c"
+    },
+    {
+      "name": "auth-终端面-小程序",
+      "id": "user-1",
+      "ts": 1700000001000,
+      "nonce": "auth-t-1",
+      "proto": 1,
+      "kind": "terminal",
+      "client": "miniapp",
+      "signableHex": "0a06757365722d3110e8d795ffbc311a08617574682d742d3120012a087465726d696e616c32076d696e69617070",
+      "tokenHex": "b9379f433ea5385ce61a56c273ffa851d0b946f9ee9af2c1cb3db3b97246b605",
+      "authHex": "0a06757365722d3110e8d795ffbc311a08617574682d742d3120012a087465726d696e616c32076d696e696170703a20b9379f433ea5385ce61a56c273ffa851d0b946f9ee9af2c1cb3db3b97246b605"
+    },
+    {
+      "name": "auth-终端面-web",
+      "id": "user-2",
+      "ts": 1700000002000,
+      "nonce": "auth-t-2",
+      "proto": 1,
+      "kind": "terminal",
+      "client": "web",
+      "signableHex": "0a06757365722d3210d0df95ffbc311a08617574682d742d3220012a087465726d696e616c3203776562",
+      "tokenHex": "81d598e78112f4be947c524521fa422181594452b918dfce25a74f6e12b46a64",
+      "authHex": "0a06757365722d3210d0df95ffbc311a08617574682d742d3220012a087465726d696e616c32037765623a2081d598e78112f4be947c524521fa422181594452b918dfce25a74f6e12b46a64"
+    },
+    {
+      "name": "auth-终端面带授权范围与过期",
+      "id": "user-3",
+      "ts": 1700000003000,
+      "nonce": "auth-t-3",
+      "proto": 1,
+      "kind": "terminal",
+      "client": "web",
+      "scope": [
+        "node-aaa",
+        "node-bbb"
+      ],
+      "expires": 1700003600000,
+      "signableHex": "0a06757365722d3310b8e795ffbc311a08617574682d742d3320012a087465726d696e616c320377656242086e6f64652d61616142086e6f64652d6262624880adf180bd31",
+      "tokenHex": "524112c5ca2e8efd700e94cbdcf7baa38ccdcd01a572887e78a301e89aa7c886",
+      "authHex": "0a06757365722d3310b8e795ffbc311a08617574682d742d3320012a087465726d696e616c32037765623a20524112c5ca2e8efd700e94cbdcf7baa38ccdcd01a572887e78a301e89aa7c88642086e6f64652d61616142086e6f64652d6262624880adf180bd31"
+    }
+  ],
+  "messages": [
+    {
+      "name": "status-在线",
+      "kind": "status",
+      "json": {
+        "nodeId": "node-aaa",
+        "online": true,
+        "ts": 1700000000000,
+        "platform": "linux",
+        "mode": "standalone",
+        "version": "0.1.59",
+        "ip": "10.0.0.7"
+      },
+      "hex": "0a086e6f64652d61616110011880d095ffbc312a056c696e7578320a7374616e64616c6f6e653a06302e312e3539420831302e302e302e37"
+    },
+    {
+      "name": "status-离线-最小字段",
+      "kind": "status",
+      "json": {
+        "nodeId": "node-bbb",
+        "online": false,
+        "ts": 1700000005000
+      },
+      "hex": "0a086e6f64652d6262621888f795ffbc31"
+    },
+    {
+      "name": "status-带label",
+      "kind": "status",
+      "json": {
+        "nodeId": "node-ccc",
+        "online": true,
+        "ts": 1700000006000,
+        "label": "研发机🏠"
+      },
+      "hex": "0a086e6f64652d636363100118f0fe95ffbc31220de7a094e58f91e69cbaf09f8fa0"
+    },
+    {
+      "name": "ack-成功带数据",
+      "kind": "ack",
+      "json": {
+        "reqId": "req-2",
+        "type": "list_projects",
+        "ok": true,
+        "dataHex": "7b226974656d73223a5b5d7d"
+      },
+      "hex": "0a057265712d32120d6c6973745f70726f6a6563747318012a0c7b226974656d73223a5b5d7d"
+    },
+    {
+      "name": "ack-失败带错误",
+      "kind": "ack",
+      "json": {
+        "reqId": "req-3",
+        "type": "read_file",
+        "ok": false,
+        "error": "文件不存在"
+      },
+      "hex": "0a057265712d331209726561645f66696c65220fe69687e4bbb6e4b88de5ad98e59ca8"
+    },
+    {
+      "name": "event-基本",
+      "kind": "event",
+      "json": {
+        "seq": 1,
+        "ts": 1700000000000,
+        "type": "assistant_message",
+        "projectId": "p1",
+        "sessionId": "s1",
+        "dataHex": "7b2274657874223a226869227d"
+      },
+      "hex": "08011080d095ffbc311a11617373697374616e745f6d657373616765220270312a027331320d7b2274657874223a226869227d"
+    },
+    {
+      "name": "event-大seq",
+      "kind": "event",
+      "json": {
+        "seq": 9007199254740990,
+        "ts": 1700000009000,
+        "type": "turn_end"
+      },
+      "hex": "08feffffffffffff0f10a89696ffbc311a087475726e5f656e64"
+    },
+    {
+      "name": "event-带来源节点",
+      "kind": "event",
+      "json": {
+        "seq": 3,
+        "ts": 1700000002000,
+        "type": "tick",
+        "dataHex": "7b226e223a317d",
+        "nodeId": "node-ccc"
+      },
+      "hex": "080310d0df95ffbc311a047469636b32077b226e223a317d3a086e6f64652d636363"
+    },
+    {
+      "name": "subscribe-三节点",
+      "kind": "subscribe",
+      "json": {
+        "ids": [
+          "node-aaa",
+          "node-bbb",
+          "node-ccc"
+        ]
+      },
+      "hex": "0a086e6f64652d6161610a086e6f64652d6262620a086e6f64652d636363"
+    },
+    {
+      "name": "subscribe-单节点",
+      "kind": "subscribe",
+      "json": {
+        "ids": [
+          "node-aaa"
+        ]
+      },
+      "hex": "0a086e6f64652d616161"
+    },
+    {
+      "name": "snapshot-两节点",
+      "kind": "snapshot",
+      "json": {
+        "nodes": [
+          {
+            "nodeId": "node-aaa",
+            "online": true,
+            "lastSeen": 1700000000000,
+            "platform": "linux",
+            "version": "0.1.59",
+            "ip": "10.0.0.7",
+            "detailHex": "7b226c6162656c223a22e6b58be8af95e88a82e782b9222c227374617473223a7b227475726e73223a337d7d"
+          },
+          {
+            "nodeId": "node-bbb",
+            "online": false,
+            "lastSeen": 1700000003000
+          }
+        ],
+        "seq": 42
+      },
+      "hex": "0a5a0a086e6f64652d61616110011880d095ffbc3122056c696e75782a06302e312e3539320831302e302e302e373a2c7b226c6162656c223a22e6b58be8af95e88a82e782b9222c227374617473223a7b227475726e73223a337d7d0a110a086e6f64652d62626218b8e795ffbc31102a"
+    },
+    {
+      "name": "info-基本",
+      "kind": "info",
+      "json": {
+        "nodeId": "node-aaa",
+        "platform": "linux",
+        "version": "0.1.59",
+        "ip": "10.0.0.7",
+        "projects": 2,
+        "sessions": 5,
+        "running": 1,
+        "waiting": 1,
+        "ts": 1700000000000
+      },
+      "hex": "0a086e6f64652d61616112056c696e75781a06302e312e3539220831302e302e302e3728023005380140014880d095ffbc31"
+    },
+    {
+      "name": "info-仅节点（无项目）",
+      "kind": "info",
+      "json": {
+        "nodeId": "node-bbb",
+        "projects": 0,
+        "sessions": 0,
+        "running": 0,
+        "waiting": 0,
+        "ts": 1700000004000
+      },
+      "hex": "0a086e6f64652d62626248a0ef95ffbc31"
+    },
+    {
+      "name": "notify-审批请求",
+      "kind": "notify",
+      "json": {
+        "seq": 0,
+        "ts": 1700000000000,
+        "kind": "approval_request",
+        "projectId": "p1",
+        "sessionId": "s1",
+        "dataHex": "7b22617070726f76616c4964223a226131222c22746f6f6c4e616d65223a2272756e5f7368656c6c227d",
+        "nodeId": "node-aaa"
+      },
+      "hex": "1080d095ffbc311a10617070726f76616c5f72657175657374220270312a027331322a7b22617070726f76616c4964223a226131222c22746f6f6c4e616d65223a2272756e5f7368656c6c227d3a086e6f64652d616161"
+    },
+    {
+      "name": "notify-回合完成",
+      "kind": "notify",
+      "json": {
+        "seq": 7,
+        "ts": 1700000010000,
+        "kind": "turn_completed",
+        "sessionId": "s2"
+      },
+      "hex": "080710909e96ffbc311a0e7475726e5f636f6d706c657465642a027332"
+    }
+  ]
+}

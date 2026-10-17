@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="600" viewBox="0 0 980 600" role="img" aria-label="ZQAgent 架构图" font-family="ui-sans-serif, system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <rect width="980" height="600" fill="#0b1020"/>
+
+  <text x="40" y="48" font-size="22" font-weight="700" fill="#ffffff" text-anchor="start">ZQAgent 架构</text>
+  <text x="40" y="72" font-size="13" font-weight="400" fill="#8b96b5" text-anchor="start">开源部分：引擎、工具、权限、CLI、节点服务　|　闭源部分：云端账号与计费</text>
+
+  <rect x="40" y="100" width="280" height="96" rx="10" fill="#141a2e" stroke="#2a3350"/>
+     <text x="56" y="128" font-size="15" font-weight="600" fill="#eef2ff" text-anchor="start">终端 CLI</text>
+     <text x="56" y="152" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">交互式会话 · 4 种运行模式</text><text x="56" y="171" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">审批卡片 · 会话续接</text>
+     <rect x="40" y="100" width="4" height="96" rx="2" fill="#818cf8"/>
+  <rect x="350" y="100" width="280" height="96" rx="10" fill="#141a2e" stroke="#2a3350"/>
+     <text x="366" y="128" font-size="15" font-weight="600" fill="#eef2ff" text-anchor="start">桌面应用 / 节点控制台</text>
+     <text x="366" y="152" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">图形界面 · 托盘常驻</text><text x="366" y="171" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">通过本地引擎驱动</text>
+     <rect x="350" y="100" width="4" height="96" rx="2" fill="#818cf8"/>
+  <rect x="660" y="100" width="280" height="96" rx="10" fill="#141a2e" stroke="#2a3350"/>
+     <text x="676" y="128" font-size="15" font-weight="600" fill="#eef2ff" text-anchor="start">手机 / QQ 远程</text>
+     <text x="676" y="152" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">派发任务 · 审批 · 查看进度</text><text x="676" y="171" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">经云端 Hub 转发</text>
+     <rect x="660" y="100" width="4" height="96" rx="2" fill="#818cf8"/>
+
+  <rect x="40" y="226" width="900" height="104" rx="10" fill="#141a2e" stroke="#2a3350"/>
+     <text x="56" y="254" font-size="15" font-weight="600" fill="#eef2ff" text-anchor="start">TurnEngine（异步事件循环）</text>
+     <text x="56" y="278" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">思考 → 工具调用 → 观察，逐迭代推进；支持运行中追加指示（steering）与会话压缩</text>
+     <rect x="40" y="226" width="4" height="104" rx="2" fill="#a78bfa"/>
+
+  <rect x="40" y="360" width="210" height="120" rx="10" fill="#141a2e" stroke="#2a3350"/>
+     <text x="56" y="388" font-size="15" font-weight="600" fill="#eef2ff" text-anchor="start">ToolRegistry</text>
+     <text x="56" y="412" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">19 个内置工具</text><text x="56" y="431" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">文件 / Shell / 网络</text><text x="56" y="450" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">Git / 补丁 / 协作</text>
+     <rect x="40" y="360" width="4" height="120" rx="2" fill="#22d3ee"/>
+  <rect x="270" y="360" width="210" height="120" rx="10" fill="#141a2e" stroke="#2a3350"/>
+     <text x="286" y="388" font-size="15" font-weight="600" fill="#eef2ff" text-anchor="start">PermissionEngine</text>
+     <text x="286" y="412" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">风险分级</text><text x="286" y="431" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">模式门控</text><text x="286" y="450" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">逐次审批</text>
+     <rect x="270" y="360" width="4" height="120" rx="2" fill="#f472b6"/>
+  <rect x="500" y="360" width="210" height="120" rx="10" fill="#141a2e" stroke="#2a3350"/>
+     <text x="516" y="388" font-size="15" font-weight="600" fill="#eef2ff" text-anchor="start">Providers</text>
+     <text x="516" y="412" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">OpenAI 兼容协议</text><text x="516" y="431" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">DeepSeek / OpenAI</text><text x="516" y="450" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">自定义端点</text>
+     <rect x="500" y="360" width="4" height="120" rx="2" fill="#34d399"/>
+  <rect x="730" y="360" width="210" height="120" rx="10" fill="#141a2e" stroke="#2a3350"/>
+     <text x="746" y="388" font-size="15" font-weight="600" fill="#eef2ff" text-anchor="start">MCP / Agents</text>
+     <text x="746" y="412" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">外部工具注入</text><text x="746" y="431" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">自定义 Agent</text><text x="746" y="450" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">Prompt 热更新</text>
+     <rect x="730" y="360" width="4" height="120" rx="2" fill="#fbbf24"/>
+
+  <rect x="40" y="510" width="620" height="60" rx="10" fill="#101830" stroke="#2a3350"/>
+  <text x="56" y="536" font-size="14" font-weight="600" fill="#eef2ff" text-anchor="start">@zqagent/shared · proto/</text>
+  <text x="56" y="556" font-size="12" font-weight="400" fill="#9aa4bf" text-anchor="start">线协议、消息帧、共享类型（本仓库内，与 core 同源构建）</text>
+
+  <rect x="690" y="510" width="250" height="60" rx="10" fill="none" stroke="#4b5563" stroke-dasharray="6 5"/>
+  <text x="706" y="536" font-size="14" font-weight="600" fill="#cbd5e1" text-anchor="start">云端 Hub（闭源）</text>
+  <text x="706" y="556" font-size="12" font-weight="400" fill="#94a3b8" text-anchor="start">账号 · 订阅 · 支付 · 配额</text>
+</svg>

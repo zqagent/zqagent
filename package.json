@@ -1,0 +1,15 @@
+{
+  "name": "zqagent-oss",
+  "private": true,
+  "version": "0.0.0",
+  "description": "ZQAgent：可在终端、桌面与手机远程使用的 AI Agent（开源引擎与 CLI）",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@9.15.0",
+  "engines": { "node": ">=18.17" },
+  "scripts": {
+    "build": "pnpm --filter @zqagent/core build",
+    "dev": "pnpm --filter @zqagent/core dev",
+    "test": "pnpm --filter @zqagent/core test",
+    "typecheck": "pnpm --filter @zqagent/core typecheck"
+  }
+}
