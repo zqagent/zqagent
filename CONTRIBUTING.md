@@ -29,6 +29,13 @@ pnpm --filter @zqagent/core dev         # 本地启动 CLI
 - 任何写文件、起进程、发网络请求的逻辑都必须走 `PermissionEngine`，不要自己直接调用 `fs.writeFile` 或 `child_process`。
 - 改动线协议时同步更新 `proto/` 与 `docs/wire-protocol.md`，并跑 `pnpm --filter @zqagent/core exec tsx scripts/gen_wire_vectors.ts` 重新生成向量。
 
+## 双语文档
+
+`docs/architecture.md` 与 `docs/wire-protocol.md` 有英文版（`docs/en/`）。
+修改这两篇时请**同一次提交里同步更新英文版**，否则英文读者会看到过期内容。
+其余文档目前只有中文，新增时不必强制翻译，但请在 README 的文档表中保持链接有效
+（导出脚本会校验所有相对链接，失效会直接失败）。
+
 ## 测试
 
 - 修 bug 请附带一个能复现该 bug 的测试。
