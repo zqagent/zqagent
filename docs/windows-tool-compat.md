@@ -89,7 +89,7 @@
 
 ### 构建期内嵌 ripgrep
 
-`scripts/lib/ripgrep_dist.mjs` 在构建时按目标平台下载 rg 并作为 SEA asset 打包：
+`packages/core/scripts/lib/ripgrep_dist.mjs` 在构建时按目标平台下载 rg 并作为 SEA asset 打包：
 
 - 下载源按序尝试 `ZQAGENT_RG_BUNDLE` 本地文件 → GitHub Release → npmmirror
   的 `ripgrep-prebuilt` 镜像；兼容两种压缩包目录布局（根目录 `rg` 与

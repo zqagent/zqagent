@@ -3,8 +3,8 @@
 本文件是 zqagent 新通讯底座（Rust 网关 + 纯 Node 节点 + web/小程序/App 终端）的**规范性契约**。
 权威 schema 见 [`proto/fleet.proto`](../proto/fleet.proto)；三方实现与交叉向量见 §7。
 
-> 背景与整体方案见 [rust-gateway-plan.md](rust-gateway-plan.md)。本协议**不是 MQTT 的复刻**（MQTT 已整体退场）：
-> 网关自己持有路由表，因此不需要 topic 通配符匹配、retained、LWT、QoS1 机件。
+> 本协议**不是 MQTT 的复刻**（MQTT 已整体退场）：网关自己持有路由表，
+> 因此不需要 topic 通配符匹配、retained、LWT、QoS1 机件。
 
 ## 1. 帧格式
 
@@ -222,7 +222,7 @@ HTTP 可观测端点（`/healthz`、`/metrics`）与 `/ws` 共用同一端口，
 | Rust | `gateway/`（crate `zqagent-gateway`） | `prost` + 手写帧编解码；连接层见 `frame/stream/auth/registry/eventbuf` |
 | 连接层 | `gateway/src/main.rs` | wss 终结、握手、心跳、快照、扇出、`/healthz`、`/metrics` |
 
-**交叉向量**：[`proto/fixtures/wire-vectors.json`](fixtures/wire-vectors.json)（提交入库）保存
+**交叉向量**：[`proto/fixtures/wire-vectors.json`](../proto/fixtures/wire-vectors.json)（提交入库）保存
 规范输入与其期望字节。Node 与 Rust 两侧都必须能**编码出完全相同的字节**并**解码回相同语义**。
 
 > 说明：原方案写的是「三份 codec」。实现时发现 Node 与浏览器可共用同一份可移植实现

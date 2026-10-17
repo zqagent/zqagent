@@ -1,5 +1,7 @@
 # ZQAgent
 
+**简体中文** · [English](./README.en.md) · [繁體中文](./README.zh-TW.md)
+
 **在终端、桌面或手机上，让 AI 帮你写代码、改文件、跑命令——有副作用的操作先问你。**
 
 [![CI](https://github.com/zqagent/zqagent/actions/workflows/ci.yml/badge.svg)](https://github.com/zqagent/zqagent/actions/workflows/ci.yml)
@@ -22,7 +24,15 @@ ZQAgent 是一个可自托管的 AI 编码 Agent。它自己读代码、改文�
 
 ## 安装
 
-需要 **Node.js >= 18.17**。
+**Linux（零依赖，推荐）**
+
+```bash
+curl -fsSL https://agent.cd-zq.com/install.sh | sh
+```
+
+脚本下载对应架构的单文件可执行程序、校验 SHA-256，并装进 `PATH`，无需预先安装 Node。
+
+**其它平台 / 用 npm 管理版本**（需要 Node.js >= 18.17）
 
 ```bash
 npm i -g @zqagent/core
@@ -124,8 +134,12 @@ ZQAgent 的前提是**模型输出不可信**：
 | 上下文压缩 | [docs/context-compaction.md](./docs/context-compaction.md) |
 | 节点服务 REST API | [docs/server-api.md](./docs/server-api.md) |
 | QQ 机器人 | [docs/qq-bot.md](./docs/qq-bot.md) |
+| 共享库（协议 / 加密 / 审批 / 通知） | [docs/shared.md](./docs/shared.md) |
 | Windows 终端兼容 | [docs/windows-tool-compat.md](./docs/windows-tool-compat.md) |
 | 单文件可执行（SEA）排错 | [docs/cli-sea-troubleshooting.md](./docs/cli-sea-troubleshooting.md) |
+| LLM 连接错误排查 | [docs/llm-connection-troubleshooting.md](./docs/llm-connection-troubleshooting.md) |
+
+面向使用者的指南（安装、CLI 用法、Agent、MCP）：<https://agent.cd-zq.com/>
 
 ## 开发
 

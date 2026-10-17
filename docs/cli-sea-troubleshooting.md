@@ -9,7 +9,7 @@
 
 - 构建产物：`packages/core/scripts/build_cli_binary.mjs`
 - 对照探针：`packages/core/scripts/make_sea_probes.mjs`（`pnpm run probes:sea`）
-- 共用下载/解压：`scripts/lib/node_dist.mjs`
+- 共用下载/解压：`packages/core/scripts/lib/node_dist.mjs`
 
 ---
 
@@ -207,7 +207,7 @@ single-executable applications only supports loading built-in modules.
 
 **修复**：
 
-- 新增空桩 `scripts/stubs/encoding.cjs`（node-fetch 仅在非 UTF-8 转码时使用
+- 新增空桩 `packages/core/scripts/stubs/encoding.cjs`（node-fetch 仅在非 UTF-8 转码时使用
   `convert`，不提供时行为与「require 抛错被 catch」一致）；
 - `tsup.sea.config.ts` 用 `esbuildOptions.alias` 把 `encoding` 指向该桩，让
   esbuild 直接内联，bundle 里不再有非内置 `require`。
