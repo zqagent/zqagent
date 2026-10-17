@@ -7,11 +7,12 @@ on:
 
 jobs:
   test:
+    name: test (node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node: [18, 20, 22]
+        node: [20, 22]
     steps:
       - uses: actions/checkout@v4
 
@@ -28,3 +29,20 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+
+  # package.json 声明 engines >=18.17，但测试工具链（vitest 4 / vite 8）要求 Node >=20。
+  # 因此 Node 18 单独跑冒烟：只验证构建产物能启动，不跑测试。
+  smoke-node18:
+    name: smoke (node 18 runtime)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --config.engine-strict=false
+      - run: pnpm build
+      - run: node packages/core/bin/zqagent --version
+      - run: node packages/core/bin/zqagent --help
