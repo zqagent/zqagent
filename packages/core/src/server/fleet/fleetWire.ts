@@ -71,6 +71,8 @@ export interface FleetInfoBlob {
     sessionId?: string;
     name?: string | null;
     status?: string;
+    lastUserMessage?: string | null;
+    lastCompletedAt?: string | null;
   }>;
   ts?: string;
 }

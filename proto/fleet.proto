@@ -143,7 +143,12 @@ message Auth {
   string nonce = 3;   // 一次性随机串
   uint32 proto = 4;   // 协议能力版本（当前 1）
   string kind = 5;    // "node" | "terminal"
-  string client = 6;  // 终端载体："web" | "miniapp" | "app"（节点面留空）
+  // 终端载体：`"web"` | `"miniapp"` | `"app"` | `"hub"`（节点面留空）。
+  // 网关对终端面做**白名单校验**（fail closed，空值也拒绝），白名单见
+  // gateway/src/auth.rs 的 `TERMINAL_CLIENTS`，须与控制面
+  // packages/hub/src/terminalCreds.ts 的 `TERMINAL_CLIENTS` 保持一致。
+  // `hub` 为控制面自身的告警订阅连接（订阅全部已纳管节点的 NOTIFY）。
+  string client = 6;
   bytes token = 7;    // 节点面 = HMAC-SHA256(fleetSecret, encode(Auth 去 token))；
                       // 终端面 = HMAC-SHA256(terminalSecret, encode(Auth 去 token))
   /**

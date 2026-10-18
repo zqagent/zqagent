@@ -561,6 +561,7 @@ export class FleetNodeBridge {
       name: string | null;
       status: string;
       lastUserMessage: string | null;
+      lastCompletedAt: string | null;
     }> = [];
     const projects = allProjectSummaries(this.opts.deps.store).map((p) => {
       let running = 0;
@@ -575,6 +576,9 @@ export class FleetNodeBridge {
             name: s.name ?? null,
             status: s.status,
             lastUserMessage: lastUserMessage(s),
+            // 控制面的聚合邮件靠它判断「这台机器最近有没有在干活」；
+            // 状态跃迁可能被 info 节流跳过，完成时间不会。
+            lastCompletedAt: s.lastCompletedAt ?? null,
           });
         }
       } catch {

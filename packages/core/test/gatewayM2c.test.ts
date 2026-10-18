@@ -71,9 +71,13 @@ class Peer {
     scope: string[] = [],
   ): Promise<Peer> {
     const peer = await Peer.connect(url, opts);
-    // 终端面（M5）：令牌必须带 scope（网关 fail closed），且用独立的 terminal secret 签
+    // 终端面（M5）：令牌必须带 scope 与白名单内的载体（网关 fail closed），
+    // 且用独立的 terminal secret 签
     const base: Auth = { id, ts: Date.now(), nonce: `n-${id}`, proto: 1, kind };
-    const auth: Auth = kind === "terminal" ? { ...base, scope, expires: Date.now() + 3_600_000 } : base;
+    const auth: Auth =
+      kind === "terminal"
+        ? { ...base, client: "web", scope, expires: Date.now() + 3_600_000 }
+        : base;
     const secret = kind === "terminal" ? TERMINAL_SECRET : SECRET;
     peer.send(FrameType.AUTH, encodeAuth({ ...auth, token: hmacSha256(secret, signableAuthBytes(auth)) }));
     const ok = decodeAuthOk((await peer.next(FrameType.AUTH_OK)).payload);

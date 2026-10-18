@@ -215,6 +215,19 @@ HTTP 可观测端点（`/healthz`、`/metrics`）与 `/ws` 共用同一端口，
 | 未知字段号（未来版本新增） | **跳过**（按 wire type 消费），不判错——保证前向兼容 |
 | 非法 wire type（3/4 组等） | 判错 |
 
+握手层的额外规则（终端面）：
+
+| 情况 | 处理 |
+| --- | --- |
+| `kind` 不是 `terminal` | 拒绝（`KindMismatch`） |
+| `client` 不在白名单（`web`/`miniapp`/`app`/`hub`，含空串） | 拒绝（`UnknownClient`，fail closed） |
+| `scope` 为空 | 拒绝（`EmptyScope`，fail closed） |
+| `expires` 已过期 | 拒绝（`Expired`；终端令牌跳过 ±60s 窗口） |
+
+`client` 在签名字节内，修改它必然导致 `BadToken`；白名单只用于「签发方签了什么」这一层，
+两处常量（网关 `gateway/src/auth.rs`、控制面 `packages/hub/src/terminalCreds.ts`）必须同步。
+`hub` 表示控制面自身的告警订阅连接。
+
 ## 7. 实现与交叉验证
 
 | 实现 | 位置 | 说明 |

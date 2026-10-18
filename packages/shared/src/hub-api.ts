@@ -1060,3 +1060,194 @@ export function hubNotificationStream(
     controller.abort();
   };
 }
+
+// ===================== 任务通知设置（Hub 订阅网关 NOTIFY 后远程通知） =====================
+
+export type HubNotifyChannelType = "email" | "sms" | "wechat" | "webhook";
+
+export type HubWebhookFormat = "generic" | "onebot" | "wecom" | "dingtalk" | "feishu";
+
+export interface HubNotifyChannelView {
+  id: string;
+  type: HubNotifyChannelType;
+  enabled: boolean;
+  /**
+   * email: `{ to, subjectPrefix? }`
+   * sms: `{ phone, includeLink? }`
+   * wechat: `{ openid, templateId?, fields?, url? }`
+   * webhook: `{ url, format, targetType?, target? }`
+   */
+  config: Record<string, string>;
+}
+
+export interface HubNotifySettingsView {
+  enabled: boolean;
+  events: {
+    approval: boolean;
+    question: boolean;
+    completed: boolean;
+    error: boolean;
+  };
+  channels: HubNotifyChannelView[];
+  cooldownSeconds?: number;
+  /** 聚合窗口（秒）：窗口内事件合并成一封邮件；0 = 每条立即发送 */
+  digestSeconds?: number;
+  quietHours?: { start: string; end: string };
+}
+
+export interface HubNotifyChannelAvailability {
+  email: boolean;
+  sms: boolean;
+  wechat: boolean;
+  webhook: boolean;
+}
+
+export interface HubNotifySettingsResponse {
+  settings: HubNotifySettingsView;
+  /** 当前套餐是否允许通知渠道（free 为 false） */
+  planAllows: boolean;
+  maxChannels: number;
+  /** Hub 是否已启用告警订阅（缺网关地址/终端密钥时为 false） */
+  alertsEnabled: boolean;
+  /** 服务端各渠道后端是否就绪（未配置时发送必然失败） */
+  available: HubNotifyChannelAvailability;
+}
+
+export interface HubAlertEventView {
+  id: string;
+  userId: string;
+  nodeId: string;
+  nodeLabel?: string;
+  fleetId: string;
+  projectId?: string;
+  sessionId: string;
+  sessionName?: string | null;
+  kind: "approval_request" | "question_asked" | "turn_completed" | "turn_stopped" | "error";
+  title: string;
+  body: string;
+  link?: string;
+  createdAt: string;
+}
+
+export interface HubNotifyDeliveryResult {
+  channelId: string;
+  type: HubNotifyChannelType;
+  ok: boolean;
+  error?: string;
+}
+
+/** 读取当前账号的通知设置 */
+export async function hubNotifySettings(
+  baseUrl: string,
+  token: string,
+): Promise<HubNotifySettingsResponse> {
+  return (await req(baseUrl, token, "/api/hub/notify/settings")) as HubNotifySettingsResponse;
+}
+
+/** 保存通知设置（服务端校验；free 套餐返回 402） */
+export async function hubSaveNotifySettings(
+  baseUrl: string,
+  token: string,
+  settings: HubNotifySettingsView,
+): Promise<{ settings: HubNotifySettingsView }> {
+  return (await req(baseUrl, token, "/api/hub/notify/settings", {
+    method: "PUT",
+    body: JSON.stringify(settings),
+  })) as { settings: HubNotifySettingsView };
+}
+
+/** 向所有启用渠道发送一条测试通知 */
+export async function hubTestNotify(
+  baseUrl: string,
+  token: string,
+): Promise<{ alert: HubAlertEventView; results: HubNotifyDeliveryResult[] }> {
+  return (await req(baseUrl, token, "/api/hub/notify/test", {
+    method: "POST",
+  })) as { alert: HubAlertEventView; results: HubNotifyDeliveryResult[] };
+}
+
+/** 最近的任务告警（内存记录，用于设置页/排查） */
+export async function hubNotifyEvents(
+  baseUrl: string,
+  token: string,
+  limit = 50,
+): Promise<{ items: HubAlertEventView[] }> {
+  const qs = `?limit=${encodeURIComponent(String(limit))}`;
+  return (await req(baseUrl, token, `/api/hub/notify/events${qs}`)) as {
+    items: HubAlertEventView[];
+  };
+}
+
+// ===================== 账号级发件 SMTP（Portal 配置，授权码加密存储） =====================
+
+export interface HubSmtpView {
+  host: string;
+  port: number;
+  secure: boolean;
+  user?: string;
+  from?: string;
+  /** 是否已保存授权码（接口永不回传明文） */
+  hasPass: boolean;
+}
+
+export interface HubSmtpResponse {
+  smtp: HubSmtpView | null;
+  /** 服务端是否配置了 HUB_SMTP_*（未配账号级时用它发） */
+  serverConfigured: boolean;
+  /** 是否允许在 Portal 里配置（服务端启用了加密存储） */
+  editable: boolean;
+}
+
+/** 读取账号级发件配置（脱敏） */
+export async function hubSmtpSettings(
+  baseUrl: string,
+  token: string,
+): Promise<HubSmtpResponse> {
+  return (await req(baseUrl, token, "/api/hub/notify/smtp")) as HubSmtpResponse;
+}
+
+/**
+ * 保存账号级发件配置。
+ *
+ * `pass` 省略表示保留原授权码；传空串表示清空（内网无认证 SMTP）。
+ */
+export async function hubSaveSmtpSettings(
+  baseUrl: string,
+  token: string,
+  input: {
+    host: string;
+    port: number;
+    secure: boolean;
+    user?: string;
+    pass?: string;
+    from?: string;
+  },
+): Promise<{ smtp: HubSmtpView }> {
+  return (await req(baseUrl, token, "/api/hub/notify/smtp", {
+    method: "PUT",
+    body: JSON.stringify(input),
+  })) as { smtp: HubSmtpView };
+}
+
+/** 清除账号级发件配置（回落到服务端 HUB_SMTP_*） */
+export async function hubClearSmtpSettings(
+  baseUrl: string,
+  token: string,
+): Promise<HubSmtpResponse> {
+  return (await req(baseUrl, token, "/api/hub/notify/smtp", {
+    method: "DELETE",
+  })) as HubSmtpResponse;
+}
+
+/** 示例邮件预览（服务端用该账号真实节点快照渲染） */
+export async function hubNotifyPreview(
+  baseUrl: string,
+  token: string,
+): Promise<{ subject: string; text: string; html: string; nodeCount: number }> {
+  return (await req(baseUrl, token, "/api/hub/notify/preview")) as {
+    subject: string;
+    text: string;
+    html: string;
+    nodeCount: number;
+  };
+}
