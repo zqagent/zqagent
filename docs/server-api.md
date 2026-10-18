@@ -1,5 +1,7 @@
 # 多租户云端 Agent Server — API 测试教程（curl）
 
+**简体中文** · [English](en/server-api.md)
+
 本文档手把手演示如何用 `curl` 测试 `packages/core/src/server` 的多租户 Agent 服务，
 重点覆盖**审批挂起 → 持久化 → 超时回收 → 恢复运行**这条关键链路。
 
@@ -10,10 +12,11 @@
 
 ```bash
 # 无 LLM Key 也能启动（认证/会话/状态/隔离等都能测，只是对话 turn 会报错）
-pnpm run server
+pnpm --filter @zqagent/core run server
 
 # 带真实模型（推荐，可完整演示对话与审批链路）
-OPENAI_API_KEY=sk-... OPENAI_BASE_URL=... OPENAI_MODEL=gpt-4o-mini pnpm run server
+OPENAI_API_KEY=sk-... OPENAI_BASE_URL=... OPENAI_MODEL=gpt-4o-mini \
+  pnpm --filter @zqagent/core run server
 ```
 
 启动日志会打印演示租户信息：
@@ -45,7 +48,7 @@ export TOKEN=zk_xxxx   # 取启动日志「已创建演示租户」那一行的 
 
 # 健康检查（公开）
 curl -s $BASE/healthz
-# => {"status":"ok"}
+# => {"status":"ok","version":"dev","features":{"mcp":false}}
 
 # 无 Key → 401
 curl -s -w "\nHTTP %{http_code}\n" $BASE/api/v1/sessions
@@ -67,7 +70,8 @@ curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $TOKEN" $BASE
 curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o-mini"}' $BASE/api/v1/sessions
 # => {"data":{"sessionId":"e4df66d64d5b4d9bacea","tenantId":"demo","model":"gpt-4o-mini",
-#             "messages":[],"compaction":null,"status":"idle","approvals":[],"questions":[],
+#             "modelOverridden":true,"taskCount":0,"messages":[],"compaction":null,
+#             "status":"idle","approvals":[],"questions":[],
 #             "sessionAllowTools":[],"sessionAllowCommands":[],"savedAt":"..."}}
 
 export SID=e4df66d64d5b4d9bacea   # 替换为上面返回的 sessionId
@@ -185,7 +189,8 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/
 
 ```bash
 # 用 10 秒审批超时启动
-APPROVAL_TIMEOUT_SECONDS=10 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-4o-mini pnpm run server
+APPROVAL_TIMEOUT_SECONDS=10 OPENAI_API_KEY=sk-... OPENAI_MODEL=gpt-4o-mini \
+  pnpm --filter @zqagent/core run server
 ```
 
 ```bash
@@ -264,27 +269,13 @@ PORT=8790 OPENAI_MODEL=deepseek-flash bash scripts/test-server.sh
 完整链路演示依赖模型按指令调用 `ask_user`（提示词已尽量明确）；若模型未调用，
 脚本会提示并跳过交互演示，其余 18 项烟雾测试不受影响。
 
-## 11. 控制台（React 单页）
+## 11. 图形控制台
 
-`packages/portal/` 是 Vite + React + TypeScript 统一控制台（`pnpm --filter zqagent-portal dev`），
-按「节点 → 项目 → 会话」三层管理，覆盖全部 API：健康检查、项目管理、
-会话 CRUD、任务执行（turn/resume/steer/interrupt）、工具审批、用户提问、
-状态与事件（纯 SSE 实时流，断线自动重连）。
-
-```bash
-# 1. 启动 Server（需可用的模型配置，见第 1 节）
-pnpm run server
-
-# 2. 启动控制台
-pnpm --filter zqagent-portal dev
-# 浏览器访问 http://localhost:8080（dev 服务器把 /api 代理到 8787，也可直接填 8787 跨域用）
-
-# 3a. 桌面态：外壳自动注入本地引擎（管理员密钥），开箱即用；
-# 3b. 浏览器态：顶栏「+ 节点」填 BASE URL（http://localhost:8787）+ 密钥（管理员或项目 Key）
-```
+官方图形控制台（按「节点 → 项目 → 会话」三层管理，覆盖本文全部 API）**不在本仓库**，
+随桌面应用与云端用户中心分发。它只是上述 REST 接口的一个客户端，用 `curl` 可以完成同样的操作。
 
 管理员密钥见启动日志「管理员密钥: ...」（或 `{DATA_DIR}/admin.json`）。用它可创建/切换/
-删除项目；也可用单个项目 Key 连接（退化为单项目视图）。
+删除项目；也可用单个项目 Key 连接（退化为单项目视图）。第 12 节给出对应的 `curl` 用法。
 
 ## 12. 控制台 API：项目与节点（管理员）
 
@@ -325,7 +316,7 @@ curl -s -H "Authorization: Bearer $ADMIN" "$BASE/api/v1/fs/list?path=/home/user"
 
 - 会话记录与状态新增字段：`name` / `nameSource`（`auto` | `user`）/ `taskCount`。
 - 自动命名在后台进行，不阻塞 turn；完成时向该会话事件流写入 `session_named` 事件
-  （`data: { name, source }`），SSE / MQTT 订阅方据此实时刷新。
+  （`data: { name, source }`），SSE 订阅方据此实时刷新。
 - `name` 的生成 prompt 只要求输出短标题；若模型返回空（如推理模型的输出配额过小），
   静默跳过，不影响主流程。
 

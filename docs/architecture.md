@@ -112,3 +112,8 @@ CLI 单文件的打包链路（tsup → SEA blob → postject 注入基座）与
 | Windows 工具兼容 | [windows-tool-compat.md](windows-tool-compat.md) |
 | CLI 单文件打包与排错 | [cli-sea-troubleshooting.md](cli-sea-troubleshooting.md) |
 | LLM 连接错误排查 | [llm-connection-troubleshooting.md](llm-connection-troubleshooting.md) |
+
+英文版：[docs/en/architecture.md](en/architecture.md) ·
+[docs/en/wire-protocol.md](en/wire-protocol.md) ·
+[docs/en/server-api.md](en/server-api.md) ·
+[docs/en/shared.md](en/shared.md)

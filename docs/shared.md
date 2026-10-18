@@ -1,7 +1,12 @@
 # @zqagent/shared — 共享库
 
-`packages/shared` 是 core（节点/CLI）与 hub（控制面）**共用**的基础模块，避免二者互相依赖。
-core 与 hub 各自通过 `tsconfig` 的 `paths` 直接引用其源码并在构建期打进 bundle。
+**简体中文** · [English](en/shared.md)
+
+`packages/shared` 是节点/CLI 与控制面**共用**的基础模块，避免二者互相依赖。
+使用方各自通过 `tsconfig` 的 `paths` 直接引用其源码，并在构建期打进 bundle。
+
+> 本仓库只包含 core 一侧。云端控制面（Hub）为闭源实现，同样引用本包，
+> 因此下表的「使用方」列中出现的 hub 不在本仓库内。
 
 ## 子路径导出
 

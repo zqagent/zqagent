@@ -129,16 +129,16 @@ Please **do not open a public issue** for security problems — follow [SECURITY
 | --- | --- |
 | Architecture and event flow | [docs/en/architecture.md](./docs/en/architecture.md) |
 | Wire protocol (frames / messages / signatures) | [docs/en/wire-protocol.md](./docs/en/wire-protocol.md) |
+| Node service REST API | [docs/en/server-api.md](./docs/en/server-api.md) |
+| Shared library (protocol / crypto / approvals / notifications) | [docs/en/shared.md](./docs/en/shared.md) |
 | Context compaction | [docs/context-compaction.md](./docs/context-compaction.md) *(Chinese)* |
-| Node service REST API | [docs/server-api.md](./docs/server-api.md) *(Chinese)* |
-| Shared library (protocol / crypto / approvals / notifications) | [docs/shared.md](./docs/shared.md) *(Chinese)* |
 | QQ bot integration | [docs/qq-bot.md](./docs/qq-bot.md) *(Chinese)* |
 | Windows tool compatibility | [docs/windows-tool-compat.md](./docs/windows-tool-compat.md) *(Chinese)* |
 | CLI single-file (SEA) packaging and troubleshooting | [docs/cli-sea-troubleshooting.md](./docs/cli-sea-troubleshooting.md) *(Chinese)* |
 | LLM connection errors | [docs/llm-connection-troubleshooting.md](./docs/llm-connection-troubleshooting.md) *(Chinese)* |
 
-The architecture and wire-protocol documents are available in both languages; the rest are
-currently Chinese only. Command-line help and the in-app UI are bilingual.
+Architecture, wire protocol, the REST API tutorial, and the shared-library reference are
+available in both languages; the rest are currently Chinese only.
 
 User-facing guides (installation, CLI usage, agents, MCP): <https://agent.cd-zq.com/en/>
 

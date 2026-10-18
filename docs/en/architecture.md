@@ -110,10 +110,10 @@ common failures are covered in [cli-sea-troubleshooting.md](../cli-sea-troublesh
 | Topic | Document |
 | --- | --- |
 | This overview | architecture.md |
-| Shared library (protocol / crypto / approvals / notifications) | [../shared.md](../shared.md) |
+| Shared library (protocol / crypto / approvals / notifications) | [shared.md](shared.md) |
 | Context compaction | [../context-compaction.md](../context-compaction.md) |
 | Wire protocol v1 (frames · envelopes · messages · signatures) | [wire-protocol.md](wire-protocol.md) |
-| Node service REST API | [../server-api.md](../server-api.md) |
+| Node service REST API | [server-api.md](server-api.md) |
 | QQ bot + email notifications | [../qq-bot.md](../qq-bot.md) |
 | Windows tool compatibility | [../windows-tool-compat.md](../windows-tool-compat.md) |
 | CLI single-file packaging and troubleshooting | [../cli-sea-troubleshooting.md](../cli-sea-troubleshooting.md) |
