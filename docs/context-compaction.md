@@ -1,5 +1,7 @@
 # 上下文压缩机制 (Context Compaction)
 
+**简体中文** · [English](en/context-compaction.md)
+
 > 对齐 Python 版 zqagent 的 `compaction.py`，实现在 `packages/core/src/engine/compaction.ts`，
 > 由 `packages/core/src/engine/TurnEngine.ts` 驱动。
 

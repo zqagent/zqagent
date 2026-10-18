@@ -121,6 +121,8 @@ interface SessionRuntime {
   permissionMode: string;
   /** 输入框草稿（未发送内容，随会话持久化） */
   draft?: string;
+  /** 已提交、尚未注入当前任务的补充信息（steer）；仅内存，随 run 生命周期 */
+  pendingSteers: string[];
   /** 最近一次用户指令（发送时立即写入并落盘，供列表展示） */
   lastInput?: string;
   /** 用量累计（账本口径） */
@@ -472,6 +474,7 @@ export class SessionManager {
         throw new ApiError(409, "busy", "会话正在运行中");
       }
       rt.engine.queueSteering(input);
+      rt.pendingSteers.push(input);
       this._recordLastInput(rt, input);
       return "steered";
     }
@@ -506,7 +509,25 @@ export class SessionManager {
     const rt = this._getOrLoadRuntime(tenant, sessionId);
     if (!rt.engine) throw new ApiError(409, "not_running", "会话未在运行中");
     rt.engine.queueSteering(text);
+    rt.pendingSteers.push(text);
     this._recordLastInput(rt, text);
+  }
+
+  /**
+   * 已提交、尚未注入当前任务的补充信息。
+   *
+   * 供 GET /state 使用：前端刷新页面后据此恢复输入区上方的「排队中」提示。
+   * 只认内存中还在运行的会话——队列随 turn 结束清空，进程重启后也不会再注入。
+   */
+  pendingSteers(sessionId: string): string[] {
+    const rt = this.runtimes.get(sessionId);
+    if (!rt || !rt.runTask) return [];
+    return [...rt.pendingSteers];
+  }
+
+  /** 内存运行时的最新事件序号（无运行时为 0）：前端据此区分历史回放与新事件 */
+  sessionSeq(sessionId: string): number {
+    return this.runtimes.get(sessionId)?.seq ?? 0;
   }
 
   /** 记录最近一次用户指令并立即落盘（不等引擎把消息推进 history） */
@@ -1183,6 +1204,7 @@ export class SessionManager {
       providerId: rec.providerId,
       permissionMode: rec.permissionMode ?? "interactive",
       draft: rec.draft,
+      pendingSteers: [],
       lastInput: rec.lastInput,
       usage: rec.usage,
       lastCompaction: rec.compaction,
@@ -1314,6 +1336,13 @@ export class SessionManager {
               this._setStatus(rt, "interrupted");
               this._persist(rt);
               break;
+            case EventType.QUEUE_STEERING: {
+              // 已注入聊天流 → 从待注入队列移除（前端据此撤掉排队提示）
+              const text = String(event.data["text"] ?? "");
+              const i = rt.pendingSteers.indexOf(text);
+              if (i >= 0) rt.pendingSteers.splice(i, 1);
+              break;
+            }
           }
         }
       });
@@ -1331,6 +1360,8 @@ export class SessionManager {
       // 任务结束/回收：释放引擎引用，一切状态以磁盘为准
       rt.runTask = null;
       rt.engine = null;
+      // 未注入的补充信息随本轮任务结束一起作废
+      rt.pendingSteers = [];
     }
   }
 

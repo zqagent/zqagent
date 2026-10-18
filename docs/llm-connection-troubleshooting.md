@@ -1,5 +1,7 @@
 # LLM 连接错误排查（`Connection error.`）
 
+**简体中文** · [English](en/llm-connection-troubleshooting.md)
+
 ## 1. 症状与含义
 
 CLI / 控制台执行任务时出现：

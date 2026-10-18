@@ -550,10 +550,13 @@ describe("云端 Server：运行中补充信息(steer)", () => {
     expect(
       manager.submitOrSteer(tenant, rec.sessionId, "补充：请额外检查边界情况"),
     ).toBe("steered");
+    // 尚未注入：状态快照需带回待注入队列，刷新页面后才能恢复排队提示
+    expect(manager.pendingSteers(rec.sessionId)).toEqual(["补充：请额外检查边界情况"]);
 
     // 释放 run，让 steering 在迭代间隙注入并最终完成
     release();
     await waitFor(() => manager.getSession(tenant.id, rec.sessionId)!.status === "completed");
+    expect(manager.pendingSteers(rec.sessionId)).toEqual([]);
 
     const s = manager.getSession(tenant.id, rec.sessionId)!;
     const userMsgs = (s.messages as Array<{ role: string; content: string }>).filter(

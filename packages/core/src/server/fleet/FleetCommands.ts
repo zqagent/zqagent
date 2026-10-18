@@ -182,7 +182,7 @@ function sessionSummary(s: SessionRecord) {
   };
 }
 
-function stateView(rec: SessionRecord) {
+function stateView(rec: SessionRecord, pendingSteers: string[], seq: number) {
   return {
     sessionId: rec.sessionId,
     status: rec.status,
@@ -193,6 +193,8 @@ function stateView(rec: SessionRecord) {
     taskCount: rec.taskCount ?? 0,
     permissionMode: rec.permissionMode ?? "interactive",
     draft: rec.draft ?? "",
+    pendingSteers,
+    seq,
     messageCount: (rec.messages as unknown[]).length,
     approvals: rec.approvals,
     questions: rec.questions,
@@ -431,7 +433,9 @@ export async function dispatchFleetCommand(
       case "get_state": {
         const rec = manager.getSession(project().id, sessionId());
         if (!rec) throw new ApiError(404, "not_found", "会话不存在");
-        return ok(stateView(rec));
+        return ok(
+          stateView(rec, manager.pendingSteers(sessionId()), manager.sessionSeq(sessionId())),
+        );
       }
 
       case "get_events": {

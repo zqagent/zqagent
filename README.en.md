@@ -131,14 +131,14 @@ Please **do not open a public issue** for security problems — follow [SECURITY
 | Wire protocol (frames / messages / signatures) | [docs/en/wire-protocol.md](./docs/en/wire-protocol.md) |
 | Node service REST API | [docs/en/server-api.md](./docs/en/server-api.md) |
 | Shared library (protocol / crypto / approvals / notifications) | [docs/en/shared.md](./docs/en/shared.md) |
-| Context compaction | [docs/context-compaction.md](./docs/context-compaction.md) *(Chinese)* |
+| Context compaction | [docs/en/context-compaction.md](./docs/en/context-compaction.md) |
+| LLM connection errors | [docs/en/llm-connection-troubleshooting.md](./docs/en/llm-connection-troubleshooting.md) |
 | QQ bot integration | [docs/qq-bot.md](./docs/qq-bot.md) *(Chinese)* |
 | Windows tool compatibility | [docs/windows-tool-compat.md](./docs/windows-tool-compat.md) *(Chinese)* |
 | CLI single-file (SEA) packaging and troubleshooting | [docs/cli-sea-troubleshooting.md](./docs/cli-sea-troubleshooting.md) *(Chinese)* |
-| LLM connection errors | [docs/llm-connection-troubleshooting.md](./docs/llm-connection-troubleshooting.md) *(Chinese)* |
 
-Architecture, wire protocol, the REST API tutorial, and the shared-library reference are
-available in both languages; the rest are currently Chinese only.
+Every document except the QQ bot, Windows compatibility, and CLI-packaging notes is available
+in English; those three are currently Chinese only.
 
 User-facing guides (installation, CLI usage, agents, MCP): <https://agent.cd-zq.com/en/>
 

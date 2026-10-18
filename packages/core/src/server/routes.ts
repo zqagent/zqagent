@@ -1600,6 +1600,7 @@ export function createApp(
           taskCount: rec.taskCount ?? 0,
           permissionMode: rec.permissionMode ?? "interactive",
           draft: rec.draft ?? "",
+          pendingSteers: manager.pendingSteers(params["id"]!),
           seq: latestSeq,
           messageCount: (rec.messages as unknown[]).length,
           compaction: rec.compaction,

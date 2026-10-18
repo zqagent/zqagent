@@ -116,4 +116,6 @@ CLI 单文件的打包链路（tsup → SEA blob → postject 注入基座）与
 英文版：[docs/en/architecture.md](en/architecture.md) ·
 [docs/en/wire-protocol.md](en/wire-protocol.md) ·
 [docs/en/server-api.md](en/server-api.md) ·
-[docs/en/shared.md](en/shared.md)
+[docs/en/shared.md](en/shared.md) ·
+[docs/en/context-compaction.md](en/context-compaction.md) ·
+[docs/en/llm-connection-troubleshooting.md](en/llm-connection-troubleshooting.md)
