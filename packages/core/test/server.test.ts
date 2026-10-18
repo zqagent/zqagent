@@ -540,11 +540,17 @@ describe("云端 Server：运行中补充信息(steer)", () => {
 
     const manager = new SessionManager(store, 60000, { providerFactory: () => provider });
     setupServerHandlers(manager);
+    /** 总览列表靠 session_status 增量更新：记录通知，核对最近一条用户消息 */
+    const notices: Array<{ kind: string; data: Record<string, unknown> }> = [];
+    manager.setNotifyHandler((_tenantId, ev) => notices.push({ kind: ev.kind, data: ev.data }));
 
     const rec = manager.createSession(tenant, {});
     expect(manager.submitOrSteer(tenant, rec.sessionId, "开始任务")).toBe("started");
     // run 已同步启动(内存 runTask 非空)
     expect(manager.runtimeInfo(rec.sessionId)?.inMemoryRun).toBe(true);
+    const lastStatus = () => notices.filter((n) => n.kind === "session_status").at(-1);
+    expect(lastStatus()?.data.status).toBe("running");
+    expect(lastStatus()?.data.lastUserMessage).toBe("开始任务");
 
     // 运行中再次提交 → 自动转为补充信息
     expect(
@@ -552,6 +558,8 @@ describe("云端 Server：运行中补充信息(steer)", () => {
     ).toBe("steered");
     // 尚未注入：状态快照需带回待注入队列，刷新页面后才能恢复排队提示
     expect(manager.pendingSteers(rec.sessionId)).toEqual(["补充：请额外检查边界情况"]);
+    // 补充信息不改变 status，但仍要推送最新指令给总览列表
+    expect(lastStatus()?.data.lastUserMessage).toBe("补充：请额外检查边界情况");
 
     // 释放 run，让 steering 在迭代间隙注入并最终完成
     release();

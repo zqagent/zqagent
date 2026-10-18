@@ -349,13 +349,31 @@ export class UpdateController {
 
   private applyUpdate(version: string, stagedPath: string): void {
     this.opts.prepareExit?.();
+    const execPath = process.execPath;
     installStaged({
       dataDir: this.opts.dataDir,
-      execPath: process.execPath,
+      execPath,
       stagedPath,
       version,
       log: this.log,
     });
+
+    // 在真实目标路径上再验一次：staged 能跑不代表替换后能跑（SELinux 上下文、
+    // noexec 挂载等都会让 systemd 侧 execve 失败并陷入 203/EXEC 重启循环）。
+    // 验不过就立刻用备份回滚，保持节点可用。
+    const verify = selfCheck(execPath, version);
+    if (!verify.ok) {
+      const restored = rollbackExecutable(this.opts.dataDir, execPath, this.log);
+      // 回滚时 currentVersion() 还是旧版本，显式记下坏版本，避免下一轮又装回来
+      patchState(this.opts.dataDir, { skippedVersion: version });
+      this.recordFailure(
+        version,
+        `安装后自检失败（${verify.error ?? "未知错误"}）` +
+          (restored ? `，已回滚到 v${restored}` : "，回滚失败，需人工处理"),
+      );
+      process.exit(1);
+    }
+
     this.log(`已安装 v${version}，正在重启…`);
     // 非零退出：launchd 的 KeepAlive{SuccessfulExit=false} 只在非正常退出时拉起进程，
     // 用 0 退出会导致新版本不被启动（systemd 的 Restart=always 两者都重启）。

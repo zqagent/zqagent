@@ -2,8 +2,10 @@
  * 原子替换与回滚。
  *
  * 替换策略：
- * - Unix：先尝试 rename（同一文件系统内是原子的）；跨分区（EXDEV）时复制到 exe 同目录
- *   的 `.new` 再 rename，避免把半个文件暴露成可执行入口。
+ * - Unix：先复制到 exe 同目录的 `.new`，再 rename 覆盖（同目录内 rename 是原子的）。
+ *   不能直接跨目录 rename：那样会把 inode 连同源目录的 SELinux 上下文（如 `var_lib_t`）
+ *   一起搬进 `/usr/local/bin`，systemd 执行时会因类型不允许而 `203/EXEC`。
+ *   在目标目录新建文件则可继承父目录的 `bin_t`，与 install-node.sh 的 `cp` 行为一致。
  * - Windows：运行中的 exe 不能覆盖，但允许改名——先把旧文件改成 `.old`，再落新文件。
  *
  * 备份统一放在 `<dataDir>/updates/backup/`（该目录一定可写），供 `update --rollback` 使用。
@@ -51,19 +53,18 @@ export function replaceExecutable(execPath: string, stagedPath: string): void {
     return;
   }
 
+  // 始终在目标目录落一个新文件：跨目录 rename 会保留源端的 SELinux 上下文
+  const tmp = `${execPath}.new`;
+  fs.rmSync(tmp, { force: true });
   try {
-    fs.renameSync(stagedPath, execPath);
-    fs.chmodSync(execPath, 0o755);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EXDEV") throw err;
-    // 跨文件系统：先复制到同目录，再原子 rename 覆盖
-    const tmp = `${execPath}.new`;
-    fs.rmSync(tmp, { force: true });
     fs.copyFileSync(stagedPath, tmp);
     fs.chmodSync(tmp, 0o755);
     fs.renameSync(tmp, execPath);
-    fs.rmSync(stagedPath, { force: true });
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
   }
+  fs.rmSync(stagedPath, { force: true });
 }
 
 /**

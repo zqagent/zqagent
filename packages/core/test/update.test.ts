@@ -151,6 +151,25 @@ describe("installer", () => {
     expect(fs.statSync(execPath).mode & 0o111).toBeTruthy();
   });
 
+  it("替换在目标目录新建文件，不搬移暂存文件的 inode", () => {
+    // 跨目录 rename 会把 inode 连同源目录的 SELinux 上下文一起搬进 /usr/local/bin，
+    // systemd 执行时被拒（203/EXEC）。这里断言替换后是目标目录里的新文件。
+    const execPath = path.join(dir, "bin", "zqagent");
+    const staged = path.join(dir, "updates", "staged", "zqagent-0.2.4");
+    fs.mkdirSync(path.dirname(execPath), { recursive: true });
+    fs.mkdirSync(path.dirname(staged), { recursive: true });
+    fs.writeFileSync(execPath, "old-binary");
+    fs.writeFileSync(staged, "new-binary");
+    const stagedIno = fs.statSync(staged).ino;
+
+    replaceExecutable(execPath, staged);
+
+    expect(fs.readFileSync(execPath, "utf-8")).toBe("new-binary");
+    expect(fs.statSync(execPath).ino).not.toBe(stagedIno);
+    expect(fs.existsSync(`${execPath}.new`)).toBe(false);
+    expect(fs.existsSync(staged)).toBe(false);
+  });
+
   it("状态文件损坏时按空状态处理", () => {
     fs.mkdirSync(path.join(dir, "updates"), { recursive: true });
     fs.writeFileSync(path.join(dir, "updates", "state.json"), "{not json");

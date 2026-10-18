@@ -82,6 +82,8 @@ const EVENT_BUFFER_MAX = 2000;
 const EVENTS_ACK_MAX_BYTES = 512 * 1024;
 /** 审批/提问挂起超时（毫秒），超时后回收内存 run 任务 */
 const APPROVAL_TIMEOUT_MS = (Number(process.env.APPROVAL_TIMEOUT_SECONDS) || 15 * 60) * 1000;
+/** 总览列表展示的用户消息长度上限（超出截断，避免通知/快照体积膨胀） */
+export const LAST_USER_MESSAGE_MAX = 200;
 
 /** 会话内存运行时状态 */
 interface SessionRuntime {
@@ -250,7 +252,23 @@ export class SessionManager {
   private _setStatus(rt: SessionRuntime, status: SessionStatus): void {
     if (rt.status === status) return;
     rt.status = status;
-    this._emitNotify(rt, "session_status", { status });
+    this._emitNotify(rt, "session_status", this._statusData(rt));
+  }
+
+  /**
+   * session_status 通知载荷：状态 + 最近一条用户消息（截断）。
+   *
+   * 跨节点工作台的任务行要显示「最后一轮任务的用户发送消息」，而该列表
+   * 只靠这条轻量通知增量更新，不额外拉状态快照。
+   */
+  private _statusData(rt: SessionRuntime): Record<string, unknown> {
+    const data: Record<string, unknown> = { status: rt.status };
+    const text = (rt.lastInput ?? "").trim();
+    if (text) {
+      data.lastUserMessage =
+        text.length > LAST_USER_MESSAGE_MAX ? `${text.slice(0, LAST_USER_MESSAGE_MAX)}…` : text;
+    }
+    return data;
   }
 
   /** 触发通知回调（无 handler 时为空操作，异常隔离不冒泡） */
@@ -534,6 +552,8 @@ export class SessionManager {
   private _recordLastInput(rt: SessionRuntime, input: string): void {
     rt.lastInput = input;
     this._persist(rt);
+    // 补充信息不改变 status，但仍需让总览列表立刻看到这条最新指令
+    this._emitNotify(rt, "session_status", this._statusData(rt));
   }
 
   /**
@@ -1236,11 +1256,12 @@ export class SessionManager {
 
   /** 装配引擎并启动一轮 Turn（供 submitTurn / submitOrSteer 复用） */
   private _startTurn(rt: SessionRuntime, input: string): void {
+    // 发送即写入最近指令：引擎要等 run() 首次推进才 push 到 messages，
+    // 先记在运行时字段上（_setStatus 的 session_status 也要带上它），
+    // 紧跟的 _persist 就能让首页列表立刻看到本条输入
+    rt.lastInput = input;
     this._setStatus(rt, "running");
     rt.turnStartedAt = Date.now();
-    // 发送即写入最近指令：引擎要等 run() 首次推进才 push 到 messages，
-    // 先记在运行时字段上，紧跟的 _persist 就能让首页列表立刻看到本条输入
-    rt.lastInput = input;
     // 新 turn：清洗历史中悬空的 tool_calls（无工具结果的），否则 LLM 会报
     // 400 "No tool output found for tool call ..."
     const engine = this._buildEngine(rt.tenant, rt, true);

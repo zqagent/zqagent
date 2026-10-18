@@ -12,6 +12,13 @@ import { Store, newId } from "../server/store.js";
 import { hubEnrollByCode } from "@zqagent/shared/hub-api";
 import { cliErr, cliLog } from "../terminal.js";
 import { DEFAULT_DATA_DIR } from "../paths.js";
+import {
+  DEFAULT_SERVE_HOST,
+  DEFAULT_SERVE_PORT,
+  buildHotCandidates,
+  discoverRunningServeInstances,
+  type ServeInstance,
+} from "./serve-instances.js";
 
 export interface LinkOptions {
   hubUrl: string;
@@ -23,8 +30,23 @@ export interface LinkOptions {
 }
 
 export type LinkResult =
-  | { mode: "hot"; nodeId: string; gatewayUrl?: string; online: boolean; label?: string }
-  | { mode: "saved"; nodeId: string; gatewayUrl?: string; label?: string };
+  | {
+      mode: "hot";
+      nodeId: string;
+      gatewayUrl?: string;
+      online: boolean;
+      label?: string;
+      dataDir: string;
+    }
+  | {
+      mode: "saved";
+      nodeId: string;
+      gatewayUrl?: string;
+      label?: string;
+      dataDir: string;
+      /** 是否由 `--data-dir` / `DATA_DIR` 显式指定（否则写进了当前目录） */
+      explicitDataDir: boolean;
+    };
 
 /** 解析 `--name value` 形式的参数 */
 function parseLinkArgs(argv: string[]): Partial<LinkOptions> & { help?: boolean } {
@@ -100,19 +122,31 @@ async function enrollViaServer(
 
 /** 执行接入（自动选择热接入 / 落盘）。失败抛出。 */
 export async function linkNode(opts: LinkOptions): Promise<LinkResult> {
-  const dataDir = path.resolve(opts.dataDir ?? process.env.DATA_DIR ?? DEFAULT_DATA_DIR);
-  const store = new Store(dataDir);
-  const adminKey = process.env.ADMIN_API_KEY ?? store.loadAdminKey();
-  const host = opts.host ?? process.env.HOST ?? "127.0.0.1";
-  const port = opts.port ?? Number(process.env.PORT ?? 8787);
+  // 空字符串（`DATA_DIR=`）按未设置处理，否则会解析成当前目录
+  const explicitDataDir = opts.dataDir?.trim() || process.env.DATA_DIR?.trim() || undefined;
+  const host = opts.host?.trim() || process.env.HOST?.trim() || DEFAULT_SERVE_HOST;
+  const port = opts.port ?? Number(process.env.PORT ?? DEFAULT_SERVE_PORT);
 
-  // 1) 本机已有 server（同 DATA_DIR）→ 热接入，立即生效
-  if (adminKey && (await probeServer(host, port, adminKey))) {
-    const status = await enrollViaServer(host, port, adminKey, opts);
-    return { mode: "hot", ...status };
+  // 1) 本机已有 server → 热接入，立即生效。
+  //    未显式给目录时，除默认的 `<cwd>/.zqagent_data` 外，还从正在运行的 serve
+  //    进程反查 `--data-dir`：安装脚本把服务跑在 `/var/lib/zqagent` 且不设 DATA_DIR，
+  //    只认默认目录会把「本机有 server」误判成「没有」，凭据写错地方（见 serve-instances.ts）。
+  const candidates: ServeInstance[] = explicitDataDir
+    ? buildHotCandidates(explicitDataDir, [], { host, port })
+    : buildHotCandidates(undefined, discoverRunningServeInstances(), { host, port });
+
+  for (const inst of candidates) {
+    const store = new Store(inst.dataDir);
+    const adminKey = process.env.ADMIN_API_KEY ?? store.loadAdminKey();
+    if (!adminKey) continue;
+    if (!(await probeServer(inst.host, inst.port, adminKey))) continue;
+    const status = await enrollViaServer(inst.host, inst.port, adminKey, opts);
+    return { mode: "hot", ...status, dataDir: inst.dataDir };
   }
 
   // 2) 本机无 server → 凭码接入并落盘 fleet.json，下次启动自动接入
+  const dataDir = path.resolve(explicitDataDir ?? DEFAULT_DATA_DIR);
+  const store = new Store(dataDir);
   const nodeId = ensureNodeId(store);
   const cred = await hubEnrollByCode(opts.hubUrl, {
     code: opts.code,
@@ -124,13 +158,21 @@ export async function linkNode(opts: LinkOptions): Promise<LinkResult> {
     label: opts.label ?? cred.label,
     enrolledAt: new Date().toISOString(),
   });
-  return { mode: "saved", nodeId, gatewayUrl: cred.gatewayUrl, label: opts.label };
+  return {
+    mode: "saved",
+    nodeId,
+    gatewayUrl: cred.gatewayUrl,
+    label: opts.label,
+    dataDir,
+    explicitDataDir: Boolean(explicitDataDir),
+  };
 }
 
 function printLinkHelp(): void {
   cliLog("用法: zqagent link --hub <url> --code <注册码> [--label 名称] [--data-dir 目录]");
   cliLog("  在 Hub 用户中心生成一次性注册码后，于节点机器执行本命令即可接入。");
-  cliLog("  已有本机 server 时热接入（免重启）；否则写入 fleet.json，下次启动自动接入。");
+  cliLog("  已有本机 server 时热接入（免重启，会自动发现运行中服务的 --data-dir）；");
+  cliLog("  否则写入 <数据目录>/fleet.json，下次启动自动接入。");
 }
 
 /** CLI 子命令入口：`zqagent link ...`。返回是否成功。 */
@@ -160,11 +202,22 @@ export async function runLinkCommand(argv: string[]): Promise<boolean> {
       cliLog("✅ 已接入 Hub（热接入，免重启）");
       cliLog(`   节点: ${r.nodeId}${r.label ? ` (${r.label})` : ""}`);
       cliLog(`   网关: ${r.gatewayUrl ?? "（未下发）"}    在线: ${r.online ? "是" : "连接中…"}`);
+      cliLog(`   数据目录: ${r.dataDir}`);
     } else {
       cliLog("✅ 接入凭据已保存（本机暂无运行中的 server）");
       cliLog(`   节点: ${r.nodeId}`);
       cliLog(`   网关: ${r.gatewayUrl ?? "（未下发）"}`);
+      cliLog(`   数据目录: ${r.dataDir}`);
       cliLog("   下次启动 server 即自动接入；或运行 zqagent serve 常驻为节点。");
+      if (!r.explicitDataDir) {
+        // 安装脚本起的服务用 /var/lib/zqagent 且不设 DATA_DIR，这里写进当前目录等于白写
+        cliLog("");
+        cliLog("⚠️  未指定 --data-dir，凭据写入了当前目录下的 .zqagent_data。");
+        cliLog("    若本机服务是由安装脚本（systemd / launchd）启动的，它读不到这份凭据，");
+        cliLog("    Hub 会一直显示未在线。请用服务的数据目录重新执行：");
+        cliLog("      zqagent link --hub <Hub地址> --code <新接入码> --data-dir <服务数据目录>");
+        cliLog("      （Linux 安装脚本默认 /var/lib/zqagent；接入码一次性，需要重新生成）");
+      }
     }
     return true;
   } catch (e) {

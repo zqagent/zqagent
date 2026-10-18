@@ -7,7 +7,7 @@
 import * as path from "path";
 import type { SessionStateEntry } from "@zqagent/shared/fleet";
 import { Store, newId, generateApiKey } from "./store.js";
-import { ApiError, type SessionManager } from "./session.js";
+import { ApiError, LAST_USER_MESSAGE_MAX, type SessionManager } from "./session.js";
 import { nodeDefaultProvider, normalizeModelList, normalizeModelMeta } from "./nodeLlm.js";
 import type { LlmProviderEntry, NodeInfo, ProjectSummary, TenantConfig } from "./types.js";
 const DEFAULT_MODEL = () =>
@@ -104,16 +104,19 @@ export function applyProvidersPatch(
  * 供「节点首页 / 工作台」建立初始视图：`session_status` 通知负责增量，
  * 这里只补一次全量快照。不含消息、模型、token —— 明细去会话详情页拉。
  */
-/** 总览列表展示的用户消息长度上限（超出截断，避免快照体积膨胀） */
-const LAST_USER_MESSAGE_MAX = 200;
-
 /**
  * 会话里用户最后一条消息（跳过空内容；没有则 null）。
  *
  * 优先用 `lastInput`：它在发送时（含运行中补充信息）立即写入并落盘，
  * 比 `messages` 早一拍——刚发出的指令不必等引擎推进 history 就能在列表看到。
+ *
+ * 除 `allSessionStates` 外，节点 info 快照（`FleetNodeBridge._publishInfo`）
+ * 也用它，让跨节点工作台的任务行显示最后一轮用户消息。
  */
-function lastUserMessage(rec: { lastInput?: string; messages: unknown[] }): string | null {
+export function lastUserMessage(rec: {
+  lastInput?: string;
+  messages: unknown[];
+}): string | null {
   const sent = (rec.lastInput ?? "").trim();
   if (sent) {
     return sent.length > LAST_USER_MESSAGE_MAX

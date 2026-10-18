@@ -24,7 +24,7 @@ import { dispatchFleetCommand, type FleetDeps } from "./FleetCommands.js";
 import { encodeOutbound, fromWireCommand, type FleetOutbound } from "./fleetWire.js";
 import { WssLink } from "./wssLink.js";
 import { dbgMark, dbgMs, dbgNow } from "../dbgTrace.js"; // [dbg] 临时调试，定位后可删
-import { allProjectSummaries, ensureNodeId } from "../projects.js";
+import { allProjectSummaries, ensureNodeId, lastUserMessage } from "../projects.js";
 import type { EventEntry, NotifyEvent } from "../types.js";
 import {
   approvalInputFromData,
@@ -548,10 +548,11 @@ export class FleetNodeBridge {
     // 聚合每个项目的会话计数（运行中 / 待审批待回答），供控制台总览。
     const totals = { projects: 0, sessions: 0, running: 0, waiting: 0 };
     /**
-     * 会话状态快照：只带标识（projectId / sessionId / name）与 status。
+     * 会话状态快照：带标识（projectId / sessionId / name）、status 与最近一条
+     * 用户消息（截断）。
      *
      * 跨节点总览（工作台、节点首页）打开时靠这份快照建立初始状态，之后由
-     * `session_status` 通知增量更新；消息/模型/token 等明细一律不进这里。
+     * `session_status` 通知增量更新；模型/token/完整消息等明细一律不进这里。
      * 复用下面已有的 `listSessions` 循环，不额外读盘。
      */
     const sessions: Array<{
@@ -559,6 +560,7 @@ export class FleetNodeBridge {
       sessionId: string;
       name: string | null;
       status: string;
+      lastUserMessage: string | null;
     }> = [];
     const projects = allProjectSummaries(this.opts.deps.store).map((p) => {
       let running = 0;
@@ -572,6 +574,7 @@ export class FleetNodeBridge {
             sessionId: s.sessionId,
             name: s.name ?? null,
             status: s.status,
+            lastUserMessage: lastUserMessage(s),
           });
         }
       } catch {
