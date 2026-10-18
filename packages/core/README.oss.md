@@ -7,6 +7,8 @@
 [![CI](https://github.com/__OSS_REPO__/actions/workflows/ci.yml/badge.svg)](https://github.com/__OSS_REPO__/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.17-brightgreen.svg)](https://nodejs.org/)
+[![Stars](https://img.shields.io/github/stars/__OSS_REPO__?style=social)](https://github.com/__OSS_REPO__)
+[![npm](https://img.shields.io/npm/v/@zqagent/core?label=npm&color=4f46e5)](https://www.npmjs.com/package/@zqagent/core)
 
 ![zqagent CLI](./docs/assets/cli-help.svg)
 
