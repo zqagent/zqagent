@@ -4,6 +4,9 @@
 
 **在終端、桌面或手機上，讓 AI 幫你寫程式、改檔案、跑指令——有副作用的操作會先問你。**
 
+🌐 **官網與使用文件：[agent.cd-zq.com](https://agent.cd-zq.com/)**
+
+[![Website](https://img.shields.io/badge/%E5%AE%98%E7%B6%B2-agent.cd--zq.com-4f46e5)](https://agent.cd-zq.com/)
 [![CI](https://github.com/zqagent/zqagent/actions/workflows/ci.yml/badge.svg)](https://github.com/zqagent/zqagent/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.17-brightgreen.svg)](https://nodejs.org/)

@@ -4,6 +4,9 @@
 
 **Your AI assistant in the terminal, on the desktop, or on your phone — write code, edit files, run commands. Anything with side effects asks you first.**
 
+🌐 **Website and docs: [agent.cd-zq.com](https://agent.cd-zq.com/en/)**
+
+[![Website](https://img.shields.io/badge/website-agent.cd--zq.com-4f46e5)](https://agent.cd-zq.com/en/)
 [![CI](https://github.com/zqagent/zqagent/actions/workflows/ci.yml/badge.svg)](https://github.com/zqagent/zqagent/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.17-brightgreen.svg)](https://nodejs.org/)
