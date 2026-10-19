@@ -171,6 +171,8 @@ function parseArgs(argv) {
       return v;
     };
     switch (arg) {
+      // `pnpm run probes:sea -- --arch ...` 会把分隔符原样传进来
+      case "--": break;
       case "--platform": opts.platform = value(); break;
       case "--arch": opts.arch = value(); break;
       case "--node-version": opts.nodeVersion = value(); break;

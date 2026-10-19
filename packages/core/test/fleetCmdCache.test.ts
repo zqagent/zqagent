@@ -61,7 +61,11 @@ function setup() {
 
   let seq = 0;
   /** 发一条已签名指令，返回它的回执（等 ack 队列里出现对应 reqId） */
-  const send = async (type: FleetCmdType, payload: Record<string, unknown> = {}): Promise<FleetAckPayload> => {
+  const send = async (
+    type: FleetCmdType,
+    payload: Record<string, unknown> = {},
+    opts: { projectId?: string; sessionId?: string } = {},
+  ): Promise<FleetAckPayload> => {
     seq += 1;
     const reqId = `r${seq}`;
     const base: Omit<FleetCmdEnvelope, "sig"> = {
@@ -71,6 +75,8 @@ function setup() {
       type,
       clientId: "c1",
       nodeId: NODE,
+      ...(opts.projectId ? { projectId: opts.projectId } : {}),
+      ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
       payload,
     };
     // 校验（签名/nonce）现在在 WssLink 里；这里直接进调度，专测本层行为
@@ -130,6 +136,76 @@ describe("只读结果缓存：写操作后必须失效", () => {
       // 第二次读命中缓存：回执 reqId 会被改写为当前请求
       const again = await send("list_projects");
       expect(again.ok).toBe(true);
+    } finally {
+      node.close();
+    }
+  });
+
+  it("会话状态事件到达后，get_state 不再返回审批出现前的旧快照", async () => {
+    const { node, send, store } = setup();
+    try {
+      const created = (await send("create_session", {}, { projectId: "p1" })).data as {
+        sessionId: string;
+      };
+      const sid = created.sessionId;
+
+      // 先读一次，把「无审批」的会话状态灌入只读缓存
+      const before = (await send("get_state", {}, { projectId: "p1", sessionId: sid })).data as {
+        approvals: unknown[];
+      };
+      expect(before.approvals).toEqual([]);
+
+      // 模拟引擎内部审批挂起：直接落盘（不经过写指令，缓存不会自动失效）
+      const rec = store.loadSession("p1", sid)!;
+      rec.status = "waiting_approval";
+      rec.approvals = [
+        {
+          id: "a1",
+          toolName: "run_shell",
+          arguments: {},
+          reason: "需要执行命令",
+          status: "pending",
+          createdAt: new Date().toISOString(),
+        },
+      ];
+      store.saveSessionSync(rec);
+
+      // 引擎广播 permission_required（生产路径：bridge.onEvent）
+      node.onEvent("p1", sid, {
+        seq: 1,
+        ts: new Date().toISOString(),
+        type: "permission_required",
+        data: { name: "run_shell" },
+      });
+
+      // 关键：不等待 1.5s TTL，控制台收到事件后立刻刷新必须能看到审批
+      const after = (await send("get_state", {}, { projectId: "p1", sessionId: sid })).data as {
+        status: string;
+        approvals: Array<{ id: string }>;
+      };
+      expect(after.status).toBe("waiting_approval");
+      expect(after.approvals.map((a) => a.id)).toContain("a1");
+    } finally {
+      node.close();
+    }
+  });
+
+  it("会话通知（session_status / approval_request）同样让会话缓存失效", async () => {
+    const { node, internals, send } = setup();
+    try {
+      const created = (await send("create_session", {}, { projectId: "p1" })).data as {
+        sessionId: string;
+      };
+      await send("get_state", {}, { projectId: "p1", sessionId: created.sessionId });
+      expect(internals.cmdResultCache.size).toBeGreaterThan(0);
+
+      node.notify("p1", {
+        kind: "approval_request",
+        sessionId: created.sessionId,
+        ts: new Date().toISOString(),
+        data: { approvalId: "a1" },
+      });
+      expect(internals.cmdResultCache.size).toBe(0);
     } finally {
       node.close();
     }

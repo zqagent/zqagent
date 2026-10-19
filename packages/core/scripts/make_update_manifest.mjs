@@ -24,6 +24,8 @@ import { createHash, sign } from "node:crypto";
 /** 产物文件名 → 清单平台键 */
 const PLATFORM_PATTERNS = [
   [/^zqagent-macos-(arm64|x64)$/, (m) => `macos-${m[1]}`],
+  // glibc 2.17 兼容产物（CentOS 7 等）：键必须与 install.sh / platformKey() 一致
+  [/^zqagent-linux-(arm64|x64)-glibc217$/, (m) => `linux-${m[1]}-glibc217`],
   [/^zqagent-linux-(arm64|x64)$/, (m) => `linux-${m[1]}`],
   [/^zqagent-windows-(arm64|x64)(?:\.exe)?$/, (m) => `windows-${m[1]}`],
 ];

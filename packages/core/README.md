@@ -2,10 +2,15 @@
 
 **在终端、桌面或手机上，让 AI 帮你写代码、改文件、跑命令——有副作用的操作先问你。**
 
+🌐 **官网与使用文档：[agent.cd-zq.com](https://agent.cd-zq.com/)**
+
+[![Website](https://img.shields.io/badge/%E5%AE%98%E7%BD%91-agent.cd--zq.com-4f46e5)](https://agent.cd-zq.com/)
 [![CI](https://github.com/zqagent/zqagent/actions/workflows/ci.yml/badge.svg)](https://github.com/zqagent/zqagent/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/zqagent/zqagent/blob/main/LICENSE)
 
 ZQAgent 是可自托管的 AI 编码 Agent。它自己读代码、改文件、跑命令，但**每一个有副作用的动作都会先问你**。
+
+![zqagent 演示：读文件 → 弹审批 → 跑测试](https://github.com/zqagent/zqagent/raw/main/docs/assets/demo.gif)
 
 - **自带模型 Key**：DeepSeek、OpenAI 或任意 OpenAI 兼容端点，用多少花多少。
 - **审批可控**：讨论 / 计划 / 交互 / 自动四种模式，写文件、执行命令逐次确认。

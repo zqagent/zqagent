@@ -4,13 +4,16 @@
 
 **Your AI assistant in the terminal, on the desktop, or on your phone — write code, edit files, run commands. Anything with side effects asks you first.**
 
+🌐 **Website and docs: [agent.cd-zq.com](https://agent.cd-zq.com/en/)**
+
+[![Website](https://img.shields.io/badge/website-agent.cd--zq.com-4f46e5)](https://agent.cd-zq.com/en/)
 [![CI](https://github.com/__OSS_REPO__/actions/workflows/ci.yml/badge.svg)](https://github.com/__OSS_REPO__/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.17-brightgreen.svg)](https://nodejs.org/)
 [![Stars](https://img.shields.io/github/stars/__OSS_REPO__?style=social)](https://github.com/__OSS_REPO__)
 [![npm](https://img.shields.io/npm/v/@zqagent/core?label=npm&color=4f46e5)](https://www.npmjs.com/package/@zqagent/core)
 
-![zqagent CLI](./docs/assets/cli-help.svg)
+![zqagent demo: read a file → approve the change → tests pass](./docs/assets/demo.gif)
 
 ZQAgent is a self-hostable AI coding agent. It reads code, edits files, and runs commands on its own — but **every side-effecting action asks for your approval first**.
 

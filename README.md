@@ -13,7 +13,7 @@
 [![Stars](https://img.shields.io/github/stars/zqagent/zqagent?style=social)](https://github.com/zqagent/zqagent)
 [![npm](https://img.shields.io/npm/v/@zqagent/core?label=npm&color=4f46e5)](https://www.npmjs.com/package/@zqagent/core)
 
-![zqagent CLI](./docs/assets/cli-help.svg)
+![zqagent 演示：读文件 → 弹审批 → 跑测试](./docs/assets/demo.gif)
 
 ZQAgent 是一个可自托管的 AI 编码 Agent。它自己读代码、改文件、跑命令，但**每一个有副作用的动作都会先问你**。
 

@@ -53,6 +53,7 @@ import {
   projectGitPush,
   projectGitRepos,
 } from "../projectOps.js";
+import { generateGitCommitMessage } from "../gitCommitMessage.js";
 import { buildToolCatalog } from "../toolsCatalog.js";
 import { listShellTasks, killShellTask } from "../../tools/shell.js";
 import { loadServerMcpConfigs } from "../mcpConfig.js";
@@ -676,6 +677,18 @@ export async function dispatchFleetCommand(
             gitRepo(payload.repo),
           ),
         );
+      }
+
+      case "git_commit_message": {
+        const t = project();
+        return ok({
+          message: await generateGitCommitMessage({
+            store,
+            tenant: t,
+            workspaceRoot: t.workspaceRoot ?? null,
+            repo: gitRepo(payload.repo),
+          }),
+        });
       }
 
       case "git_checkout": {

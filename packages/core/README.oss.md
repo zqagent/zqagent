@@ -4,13 +4,16 @@
 
 **在终端、桌面或手机上，让 AI 帮你写代码、改文件、跑命令——有副作用的操作先问你。**
 
+🌐 **官网与使用文档：[agent.cd-zq.com](https://agent.cd-zq.com/)**
+
+[![Website](https://img.shields.io/badge/%E5%AE%98%E7%BD%91-agent.cd--zq.com-4f46e5)](https://agent.cd-zq.com/)
 [![CI](https://github.com/__OSS_REPO__/actions/workflows/ci.yml/badge.svg)](https://github.com/__OSS_REPO__/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.17-brightgreen.svg)](https://nodejs.org/)
 [![Stars](https://img.shields.io/github/stars/__OSS_REPO__?style=social)](https://github.com/__OSS_REPO__)
 [![npm](https://img.shields.io/npm/v/@zqagent/core?label=npm&color=4f46e5)](https://www.npmjs.com/package/@zqagent/core)
 
-![zqagent CLI](./docs/assets/cli-help.svg)
+![zqagent 演示：读文件 → 弹审批 → 跑测试](./docs/assets/demo.gif)
 
 ZQAgent 是一个可自托管的 AI 编码 Agent。它自己读代码、改文件、跑命令，但**每一个有副作用的动作都会先问你**。
 

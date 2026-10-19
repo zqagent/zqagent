@@ -39,6 +39,78 @@ export function countRawEscapes(chunk: Buffer | string): number {
   return escCount;
 }
 
+/** readline 实例内部状态(未公开 API,供历史导航补丁访问) */
+interface HistoryNavInterface {
+  _ttyWrite: (s: string, key: unknown) => void;
+  _moveCursor: (dx: number) => void;
+  _refreshLine?: () => void;
+  line: string;
+  cursor: number;
+  historyIndex: number;
+}
+
+/**
+ * 修复 readline 的历史导航行为:
+ * 1. 默认按上/下箭头时,readline 会把光标前的内容当作搜索前缀,导致
+ *    「上箭头 → 移动光标 → 上箭头」时切不到更早的历史。这里在派发
+ *    up/down 前把光标移到行首,使前缀为空,恢复为简单的历史导航
+ *    (对齐 bash 默认行为)。
+ * 2. readline 切换历史时直接覆盖当前行,且向下回到最底部时把行清空,
+ *    正在输入的内容会丢失。这里在首次离开当前编辑行时记住草稿,向下
+ *    切回最底部时恢复草稿及光标位置;提交一行后草稿失效。
+ *
+ * 注意:必须在 InputRouter 构造之后调用,使调用链为 历史导航 → 粘贴守卫 → 原生。
+ */
+export function patchReadlineHistoryNav(rl: readline.Interface): void {
+  // readline 的 Symbol(_ttyWrite) / Symbol(_moveCursor) 只是 getter,代理到
+  // 实例属性 _ttyWrite / _moveCursor,直接覆盖实例属性即可。
+  const iface = rl as unknown as HistoryNavInterface;
+  const orig = iface._ttyWrite;
+  /** 进入历史导航前正在编辑的行;null 表示不在历史中(或已恢复/已提交) */
+  let draft: { line: string; cursor: number } | null = null;
+
+  iface._ttyWrite = function (s: string, key: unknown) {
+    const k = key as TtyKey | undefined;
+    const name = k?.name;
+    const plainArrow =
+      (name === "up" || name === "down") && !k?.ctrl && !k?.meta && !k?.shift;
+
+    if (plainArrow) {
+      // 首次按上键离开当前编辑行时记住草稿
+      if (name === "up" && iface.historyIndex === -1) {
+        draft = { line: iface.line, cursor: iface.cursor };
+      }
+      if (iface.cursor > 0) {
+        iface._moveCursor(-iface.cursor);
+      }
+    }
+
+    const prevHistoryIndex = iface.historyIndex;
+    orig.call(rl, s, key);
+
+    // 从历史项按下来回到底部时,readline 已把行清空,这里恢复草稿
+    if (
+      plainArrow &&
+      name === "down" &&
+      prevHistoryIndex >= 0 &&
+      iface.historyIndex === -1
+    ) {
+      const saved = draft;
+      draft = null;
+      if (saved) {
+        iface.line = saved.line;
+        iface.cursor = Math.min(saved.cursor, saved.line.length);
+        iface._refreshLine?.();
+      }
+    }
+  };
+
+  // 提交一行后草稿失效,避免下次历史导航恢复旧内容
+  rl.on("line", () => {
+    draft = null;
+  });
+}
+
 export interface InputRouterOptions {
   rl: readline.Interface;
   stdout?: OutputTarget;

@@ -12,6 +12,7 @@ import {
   DEFAULT_SERVE_PORT,
   buildHotCandidates,
   parseServeArgs,
+  parseServeCommandLine,
 } from "../src/cli/serve-instances.js";
 import { DEFAULT_DATA_DIR } from "../src/paths.js";
 
@@ -72,20 +73,68 @@ describe("parseServeArgs", () => {
   });
 });
 
+describe("parseServeCommandLine", () => {
+  it("解析 Windows SEA 进程（引号路径、显式端口）", () => {
+    const line =
+      '"C:\\Program Files\\zqagent\\zqagent.exe" serve --data-dir "C:\\ProgramData\\zqagent" --port 9000';
+    expect(parseServeCommandLine(line)).toEqual({
+      dataDir: path.win32.normalize("C:\\ProgramData\\zqagent"),
+      host: DEFAULT_SERVE_HOST,
+      port: 9000,
+    });
+  });
+
+  it("解析 Windows node 进程与 --flag=value 形式", () => {
+    const line =
+      '"C:\\Program Files\\nodejs\\node.exe" C:\\app\\zqagent.js serve --data-dir=C:\\zqagent\\data --host=0.0.0.0 --port=9001';
+    expect(parseServeCommandLine(line)).toEqual({
+      dataDir: path.win32.normalize("C:\\zqagent\\data"),
+      host: DEFAULT_SERVE_HOST,
+      port: 9001,
+    });
+  });
+
+  it("兼容 macOS ps 输出中带空格的路径", () => {
+    const line =
+      "/usr/local/bin/zqagent serve --data-dir /Library/Application Support/zqagent --port 8787";
+    expect(parseServeCommandLine(line)).toEqual({
+      dataDir: path.normalize("/Library/Application Support/zqagent"),
+      host: DEFAULT_SERVE_HOST,
+      port: 8787,
+    });
+  });
+
+  it("没有绝对 --data-dir 或不是 serve 进程时忽略", () => {
+    expect(parseServeCommandLine("zqagent serve")).toBeNull();
+    expect(parseServeCommandLine("zqagent serve --data-dir ./relative")).toBeNull();
+    expect(parseServeCommandLine("zqagent link --data-dir /var/lib/zqagent")).toBeNull();
+    expect(parseServeCommandLine("zqagent.exe --version")).toBeNull();
+  });
+});
+
 describe("buildHotCandidates", () => {
   const fallback = { host: DEFAULT_SERVE_HOST, port: DEFAULT_SERVE_PORT };
 
-  it("显式 --data-dir：只探测该目录，且沿用用户给的 host/port", () => {
+  it("显式 --data-dir：该目录排第一，且沿用用户给的 host/port", () => {
     const out = buildHotCandidates("/var/lib/zqagent", [], { host: "10.0.0.5", port: 9001 });
     expect(out).toEqual([{ dataDir: "/var/lib/zqagent", host: "10.0.0.5", port: 9001 }]);
   });
 
-  it("显式目录优先于反查到的实例", () => {
+  it("显式目录优先，运行中的实例作为后备追加", () => {
+    // 显式目录可能是错的（macOS 上照抄 Linux 路径、或猜成 ~/.zqagent），
+    // 丢掉反查结果会让 link 误判「本机无 server」并把凭据写丢。
     const out = buildHotCandidates("/explicit", [
       { dataDir: "/var/lib/zqagent", host: DEFAULT_SERVE_HOST, port: 8787 },
     ], fallback);
+    expect(out.map((c) => c.dataDir)).toEqual(["/explicit", "/var/lib/zqagent"]);
+  });
+
+  it("显式目录与反查到的实例相同：不重复", () => {
+    const out = buildHotCandidates("/var/lib/zqagent", [
+      { dataDir: "/var/lib/zqagent", host: DEFAULT_SERVE_HOST, port: 19001 },
+    ], fallback);
     expect(out).toHaveLength(1);
-    expect(out[0].dataDir).toBe("/explicit");
+    expect(out[0].dataDir).toBe("/var/lib/zqagent");
   });
 
   it("未显式指定：默认目录在前，运行中且目录不同的实例追加在后", () => {

@@ -23,6 +23,8 @@ export default defineConfig({
     "process.env.ZQAGENT_VERSION": JSON.stringify(PKG_VERSION),
     // 标记单文件形态：自动更新只在这种形态下允许替换自身
     "process.env.ZQAGENT_SEA": JSON.stringify("1"),
+    // glibc 兼容产物的清单键后缀（build_cli_binary.mjs --libc glibc-217 时注入）
+    "process.env.ZQAGENT_LIBC_VARIANT": JSON.stringify(process.env.ZQAGENT_LIBC_VARIANT ?? ""),
   },
   entry: { zqagent: "src/cli/index.ts" },
   format: ["cjs"],

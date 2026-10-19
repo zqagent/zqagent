@@ -15,7 +15,7 @@
 import { describe, it, expect, vi } from "vitest";
 import * as readline from "readline";
 import { PassThrough } from "stream";
-import { InputRouter, countRawEscapes } from "../src/cli/input.js";
+import { InputRouter, countRawEscapes, patchReadlineHistoryNav } from "../src/cli/input.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -346,6 +346,60 @@ describe("InputRouter Tab 键切换模式", () => {
     input.write("\r");
     await expect(p).resolves.toBe("hi");
     expect((rl as unknown as { _prompt: string })._prompt).toBe("[plan][code] > ");
+  });
+});
+
+describe("patchReadlineHistoryNav 历史导航", () => {
+  it("上下切换历史后恢复正在输入的内容与光标位置", async () => {
+    const { rl, input } = makeRouterTTY();
+    patchReadlineHistoryNav(rl);
+    rl.history = ["最近一条", "更早一条"];
+    rl.historyIndex = -1;
+
+    input.write("draft text");
+    await sleep(20);
+    expect(rl.line).toBe("draft text");
+
+    input.write("\x1b[A"); // up → 最近一条
+    await sleep(20);
+    expect(rl.line).toBe("最近一条");
+
+    input.write("\x1b[A"); // up → 更早一条
+    await sleep(20);
+    expect(rl.line).toBe("更早一条");
+
+    input.write("\x1b[B"); // down → 最近一条
+    await sleep(20);
+    expect(rl.line).toBe("最近一条");
+
+    input.write("\x1b[B"); // down → 回到草稿
+    await sleep(20);
+    expect(rl.line).toBe("draft text");
+    expect(rl.cursor).toBe("draft text".length);
+  });
+
+  it("提交历史行后草稿失效,不会在下次导航时复活", async () => {
+    const { rl, input } = makeRouterTTY();
+    patchReadlineHistoryNav(rl);
+    rl.history = ["历史行"];
+    rl.historyIndex = -1;
+
+    input.write("old draft");
+    await sleep(20);
+    input.write("\x1b[A"); // 进入历史
+    await sleep(20);
+    expect(rl.line).toBe("历史行");
+
+    input.write("\r"); // 提交历史行 → 草稿应失效
+    await sleep(20);
+
+    input.write("new draft");
+    await sleep(20);
+    input.write("\x1b[A"); // 进入历史
+    await sleep(20);
+    input.write("\x1b[B"); // 回到草稿
+    await sleep(20);
+    expect(rl.line).toBe("new draft");
   });
 });
 

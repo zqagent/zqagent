@@ -12,7 +12,7 @@ import * as path from "node:path";
 import { fetchManifest, downloadBinary, selfCheck } from "./downloader.js";
 import { platformKey } from "./manifest.js";
 import { compareVersions, parseVersion } from "./version.js";
-import { currentVersion as currentVersionOf, isSeaRuntime, serviceManager, selfUpdateCapability } from "./platform.js";
+import { currentVersion as currentVersionOf, isSeaRuntime, serviceEnvValue, serviceManager, selfUpdateCapability } from "./platform.js";
 import { parsePublicKey } from "./signature.js";
 import { installStaged, rollback as rollbackExecutable } from "./installer.js";
 import { loadState, patchState, updatesDir, type UpdateState } from "./state.js";
@@ -45,9 +45,17 @@ export interface UpdaterStatus {
   lastError?: string;
 }
 
+/**
+ * 读取更新配置：进程环境优先，缺失时回落到 systemd unit 注入的变量。
+ *
+ * 后台服务天然带全部变量；运维在交互 shell 里执行 `zqagent update` 时
+ * 只有回落这一条路，否则公钥/通道/清单地址都会被判成「未配置」。
+ */
 function env(key: string): string | undefined {
   const v = process.env[key]?.trim();
-  return v ? v : undefined;
+  if (v) return v;
+  const fromService = serviceEnvValue(key)?.trim();
+  return fromService ? fromService : undefined;
 }
 
 function num(key: string, fallback: number): number {
@@ -92,7 +100,7 @@ export class UpdateController {
   }
 
   private get autoUpdateOff(): boolean {
-    return process.env.ZQAGENT_AUTO_UPDATE?.trim() === "0";
+    return env("ZQAGENT_AUTO_UPDATE") === "0";
   }
 
   get enabled(): boolean {

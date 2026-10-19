@@ -1601,7 +1601,10 @@ export class SessionManager {
         parseOptionalPositiveNumber(process.env.CONTEXT_WINDOW) ??
         modelContextWindow(eff.modelMeta, activeModel),
       thresholdPct: parseRatio(process.env.COMPACTION_THRESHOLD_PCT),
+      softThresholdPct: parseRatio(process.env.COMPACTION_SOFT_THRESHOLD_PCT),
       capTokens: parseOptionalPositiveNumber(process.env.COMPACTION_CAP_TOKENS) ?? null,
+      // 超预算工具结果按租户/工作区隔离落盘（多租户共用一个状态目录会混内容）
+      toolResultDir: path.join(workspace, ".agent", "tool-results"),
     });
     engine.setApprover(this._makeApprover(rt));
 

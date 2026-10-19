@@ -5,7 +5,7 @@
  * - Unix：先复制到 exe 同目录的 `.new`，再 rename 覆盖（同目录内 rename 是原子的）。
  *   不能直接跨目录 rename：那样会把 inode 连同源目录的 SELinux 上下文（如 `var_lib_t`）
  *   一起搬进 `/usr/local/bin`，systemd 执行时会因类型不允许而 `203/EXEC`。
- *   在目标目录新建文件则可继承父目录的 `bin_t`，与 install-node.sh 的 `cp` 行为一致。
+ *   在目标目录新建文件则可继承父目录的 `bin_t`，与 install.sh 的 `cp` 行为一致。
  * - Windows：运行中的 exe 不能覆盖，但允许改名——先把旧文件改成 `.old`，再落新文件。
  *
  * 备份统一放在 `<dataDir>/updates/backup/`（该目录一定可写），供 `update --rollback` 使用。

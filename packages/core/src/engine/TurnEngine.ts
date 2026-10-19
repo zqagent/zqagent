@@ -31,6 +31,7 @@ import { PermissionEngine } from "../permissions/PermissionEngine.js";
 import type { ProviderClient } from "../providers/OpenAIProvider.js";
 import * as compaction from "./compaction.js";
 import type { CompactionState } from "./compaction.js";
+import { applyToolResultBudget } from "./toolResultBudget.js";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as _path from "path";
@@ -67,6 +68,15 @@ interface CompactResult {
   messagesAfter?: number;
 }
 
+/** 单次压缩最多连续执行的轮数（防止尾部消息过大时反复进出压缩） */
+const MAX_COMPACT_ROUNDS = 4;
+/** 强制压缩（溢出）后的目标水位：占触发阈值的比例 */
+const OVERFLOW_TARGET_RATIO = 0.5;
+/** 强制裁剪时丢弃的比例（溢出路径要一次让出足够空间） */
+const OVERFLOW_TRIM_FRACTION = 0.5;
+/** 压缩无进展后，至少新增这么多条消息才再次尝试预防性压缩 */
+const COMPACT_STALL_RETRY_DELTA = 20;
+
 /** TurnEngine 构造参数 */
 export interface TurnEngineOpts {
   /** LLM Provider（流式调用） */
@@ -96,23 +106,34 @@ export interface TurnEngineOpts {
   contextWindow?: number;
   /** 压缩触发阈值比例（占窗口比例，默认 0.8） */
   thresholdPct?: number;
+  /**
+   * 软阈值比例（占窗口比例）：达到它只淘汰旧工具结果，不调用 LLM。
+   * 缺省为硬阈值的 75%（即默认 60% 窗口）。
+   */
+  softThresholdPct?: number;
   /** 压缩触发阈值绝对上限（token 数；缺省不限制，即按比例用满窗口） */
   capTokens?: number | null;
+  /**
+   * 超预算工具结果的落盘目录（可选）。
+   *
+   * 多租户 Server 应指向租户/会话自己的目录，避免不同租户的内容混在一个目录里。
+   */
+  toolResultDir?: string;
 }
 
-/** 工具执行结果辅助函数：把工具返回值转成 tool 角色消息 */
+/** 工具执行结果辅助函数：把工具返回值转成 tool 角色消息（带结果预算） */
 function toolResultMessage(
   tc: ToolCall,
   result: unknown,
   taskId?: string,
+  toolResultDir?: string,
 ): Message {
-  const content =
-    typeof result === "string" ? result : JSON.stringify(result, null, 2);
+  const budgeted = applyToolResultBudget(tc.name, result, { dir: toolResultDir });
   return {
     role: "tool",
     tool_call_id: tc.id,
     tool_call_name: tc.name,
-    content,
+    content: budgeted.content,
     taskId,
   };
 }
@@ -253,12 +274,22 @@ export class TurnEngine {
   // 上下文压缩
   compactionState: CompactionState | null = null;
   private _lastContextTokens: number | null = null;
+  /** 压缩无进展时的消息条数快照；-1 表示无冷却 */
+  private _compactStalledAt = -1;
   /** 显式配置的上下文窗口大小（token 数），未设置时为 undefined（走自动检测） */
   private _contextWindow: number | undefined;
   /** 压缩触发阈值比例（默认 0.8） */
   private _thresholdPct: number;
+  /** 软阈值比例（undefined = 取硬阈值的 75%） */
+  private _softThresholdPct: number | undefined;
+  /** 是否启用软阈值淘汰（COMPACTION_ELIDE=0 可关闭） */
+  private _elisionEnabled: boolean;
+  /** 是否启用重复读取去重（COMPACTION_DEDUP=0 可关闭） */
+  private _dedupEnabled: boolean;
   /** 压缩触发阈值绝对上限（null = 不限制） */
   private _capTokens: number | null;
+  /** 超预算工具结果的落盘目录（undefined = 使用默认状态目录） */
+  private _toolResultDir: string | undefined;
 
   // 产出文件追踪（本轮 Turn 中成功写入的文件）
   private _producedFiles: string[] = [];
@@ -316,7 +347,15 @@ export class TurnEngine {
     this._hook = opts.hook;
     this._contextWindow = opts.contextWindow;
     this._thresholdPct = opts.thresholdPct ?? compaction.DEFAULT_THRESHOLD_PCT;
+    this._softThresholdPct = opts.softThresholdPct;
+    this._elisionEnabled = !/^(0|false|off|no)$/i.test(
+      (process.env.COMPACTION_ELIDE ?? "").trim(),
+    );
+    this._dedupEnabled = !/^(0|false|off|no)$/i.test(
+      (process.env.COMPACTION_DEDUP ?? "").trim(),
+    );
     this._capTokens = opts.capTokens ?? null;
+    this._toolResultDir = opts.toolResultDir;
     this._reasoningEffort = opts.reasoningEffort;
     // 注入 system prompt（仅在历史为空或首条不是 system 时）
     if (this.messages.length === 0 || this.messages[0].role !== "system") {
@@ -380,6 +419,8 @@ export class TurnEngine {
     this._cancel = false;
     this._producedFiles = [];
     this._turnStartTime = Date.now();
+    // 新 turn 重新给压缩一次机会（上一 turn 可能因无进展而处于冷却）
+    this._compactStalledAt = -1;
 
     this._emitHook((h) => h.onTurnStart?.(userInput));
 
@@ -1239,7 +1280,9 @@ export class TurnEngine {
       for (let i = 0; i < concurrent.length; i++) {
         const tc = concurrent[i];
         const { result, status } = results[i];
-        this.messages.push(toolResultMessage(tc, result, this.taskId));
+        this.messages.push(
+          toolResultMessage(tc, result, this.taskId, this._toolResultDir),
+        );
         this._trackProducedFile(
           tc,
           result as string | Record<string, unknown>,
@@ -1305,7 +1348,9 @@ export class TurnEngine {
         };
         status = "error";
       }
-      this.messages.push(toolResultMessage(tc, result, this.taskId));
+      this.messages.push(
+          toolResultMessage(tc, result, this.taskId, this._toolResultDir),
+        );
       this._trackProducedFile(
         tc,
         result as string | Record<string, unknown>,
@@ -1343,16 +1388,54 @@ export class TurnEngine {
    * 过滤 notice 消息；tool 消息只保留必要字段；
    * 其余消息剥离 display-only sidecar 字段（source/_display/ts/
    * reasoning/usage），避免污染模型上下文。
+   *
+   * 达到软阈值时先淘汰旧工具结果（零 LLM 成本），再产出最终视图。
    */
   private _outboundMessages(): Message[] {
+    // 应用压缩（outbound-only，不修改持久化历史）
+    const base = compaction.applyToOutbound(this.messages, this.compactionState);
+    // 重复读取同一文件时，旧结果已被后续读取覆盖，直接替换（信息无损）
+    const deduped = this._dedupEnabled
+      ? compaction.applyReadFileDedup(base).messages
+      : base;
+    let view = this._finalizeOutbound(deduped);
+
+    if (!this._elisionEnabled) return view;
+    // 用最终视图估算水位：reasoning 等字段发送前会被剥离，按 base 估算会高估
+    if (compaction.estimateTokens(view) < this._softTriggerTokens()) {
+      return view;
+    }
+
+    // 1) 优先淘汰旧 git_diff：一次性消费、价值衰减最快，先让出空间
+    const oneShot = compaction.applyOneShotElision(deduped);
+    if (oneShot.freedChars > 0) {
+      view = this._finalizeOutbound(oneShot.messages);
+      if (compaction.estimateTokens(view) < this._softTriggerTokens()) {
+        return view;
+      }
+    }
+
+    // 2) 仍超软阈值：按保留预算淘汰其余旧工具结果
+    //    （淘汰需要 tool_call_name，finalize 时已丢弃，因此基于未 finalize 的视图）
+    const keepChars = compaction.elisionKeepChars(
+      compaction.triggerTokens(
+        this._getContextWindow(),
+        this._thresholdPct,
+        this._capTokens,
+      ),
+    );
+    const elided = compaction.applyToolResultElision(
+      oneShot.messages,
+      keepChars,
+    );
+    if (elided.freedChars === 0) return view;
+    return this._finalizeOutbound(elided.messages);
+  }
+
+  /** 过滤 notice + 剥离 display-only 字段，得到最终发送视图 */
+  private _finalizeOutbound(sourceMessages: Message[]): Message[] {
     // display-only sidecar 字段 (发送给模型前剥离)
     const _STRIP = new Set(["source", "_display", "ts", "reasoning", "usage"]);
-
-    // 应用压缩（outbound-only，不修改持久化历史）
-    const sourceMessages = compaction.applyToOutbound(
-      this.messages,
-      this.compactionState,
-    );
 
     return sourceMessages
       .filter((m) => m.role !== "notice")
@@ -1374,6 +1457,16 @@ export class TurnEngine {
         }
         return stripped as unknown as Message;
       });
+  }
+
+  /** 软阈值（token 数）：达到它只淘汰旧工具结果 */
+  private _softTriggerTokens(): number {
+    return compaction.softTriggerTokens(
+      this._getContextWindow(),
+      this._thresholdPct,
+      this._capTokens,
+      this._softThresholdPct,
+    );
   }
 
   /** 通知消息：仅用于日志/展示，不发给模型 */
@@ -1424,19 +1517,43 @@ export class TurnEngine {
 
   // ===================== 自动压缩 =====================
 
-  /** 当前上下文 token 用量：优先采信 API 返回的精确数量，否则用 chars/4 估算 */
+  /**
+   * 当前上下文 token 用量。
+   *
+   * API 返回的 `usage.input` 是精确值，但反映的是「上一次请求」——工具结果
+   * 与淘汰/压缩都会让它过时。因此同时估算当前 outbound 视图，取较大者：
+   * 宁可早一点压缩，也不要漏判导致溢出。
+   */
   private _compactionTokens(): { tokens: number; estimated: boolean } {
-    if (this._lastContextTokens != null) {
-      return { tokens: this._lastContextTokens, estimated: false };
+    const estimated = compaction.estimateTokens(this._outboundMessages());
+    if (this._lastContextTokens == null) {
+      return { tokens: estimated, estimated: true };
     }
-    return {
-      tokens: compaction.estimateTokens(this._outboundMessages()),
-      estimated: true,
-    };
+    if (estimated > this._lastContextTokens) {
+      return { tokens: estimated, estimated: true };
+    }
+    return { tokens: this._lastContextTokens, estimated: false };
+  }
+
+  /** 压缩后重置精确计数：后续按估算值判断 */
+  private _resetContextTokens(): void {
+    this._lastContextTokens = null;
+  }
+
+  /** 当前 outbound 视图的估算 token 数 */
+  private _estimateContextTokens(): number {
+    return compaction.estimateTokens(this._outboundMessages());
   }
 
   /** 检查是否需要压缩（每轮 LLM 调用前） */
   private _compactionDue(): boolean {
+    // 上一轮压缩没能把水位降下来：等历史继续增长再试，避免每轮空转
+    if (
+      this._compactStalledAt >= 0 &&
+      this.messages.length < this._compactStalledAt + COMPACT_STALL_RETRY_DELTA
+    ) {
+      return false;
+    }
     const { tokens } = this._compactionTokens();
     return compaction.shouldCompact(
       tokens,
@@ -1494,72 +1611,106 @@ export class TurnEngine {
   ): Promise<CompactResult> {
     const contextWindow = this._getContextWindow();
     const messagesBefore = this._outboundMessages().length;
-    const keep = Math.floor(
-      compaction.KEEP_RECENT_FRACTION *
-        compaction.triggerTokens(
-          contextWindow,
-          this._thresholdPct,
-          this._capTokens,
-        ),
+    const trigger = compaction.triggerTokens(
+      contextWindow,
+      this._thresholdPct,
+      this._capTokens,
     );
-    const model = this.model;
+    // 收敛目标：溢出时压到半水位；常规压缩留 10% 余量，避免贴着阈值反复触发
+    const target = Math.floor(
+      trigger * (force ? OVERFLOW_TARGET_RATIO : 0.9),
+    );
+    // 摘要用到独立模型时可用 COMPACTION_MODEL 指定（如更便宜的小模型）
+    const model = process.env.COMPACTION_MODEL?.trim() || this.model;
+    const reasoningEffort = compaction.summarizerReasoningEffort();
 
-    // 尝试 LLM 摘要（最多 2 次）
-    let state: CompactionState | null = null;
-    let failed = false;
+    // 每轮压低保留量：尾部单条消息可能就超过 keep，必须逐步收缩才能推进边界
+    let keep = Math.floor(compaction.KEEP_RECENT_FRACTION * trigger);
+    let method: "summarized" | "trimmed" | null = null;
+    let lastState: CompactionState | null = null;
+    let progressed = false;
 
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const logTime = new Date().toISOString();
-        state = await compaction.buildState(
-          this.messages,
-          this.provider,
-          model,
-          keep,
-          this.compactionState,
-          { reqId, logTime, reasoningEffort: this._reasoningEffort },
-        );
-        failed = false;
-        break;
-      } catch {
-        failed = true;
+    for (let round = 0; round < MAX_COMPACT_ROUNDS; round++) {
+      // 第一轮无条件执行（触发者已判定超阈值）；后续轮先看是否已收敛
+      if (round > 0 && this._estimateContextTokens() <= target) break;
+
+      // 尝试 LLM 摘要（最多 2 次）
+      let state: CompactionState | null = null;
+      for (let attempt = 0; attempt < 2 && !state; attempt++) {
+        try {
+          const logTime = new Date().toISOString();
+          state = await compaction.buildState(
+            this.messages,
+            this.provider,
+            model,
+            keep,
+            this.compactionState,
+            { reqId, logTime, reasoningEffort },
+          );
+        } catch {
+          /* 下一次尝试；仍失败则走裁剪降级 */
+        }
       }
+
+      if (state) {
+        this.compactionState = state;
+        lastState = state;
+        method = "summarized";
+        progressed = true;
+      } else {
+        // 摘要不可用 → 裁剪降级（溢出时一次让出 50%）
+        const trimmed = compaction.trimState(
+          this.messages,
+          this.compactionState,
+          force ? OVERFLOW_TRIM_FRACTION : 0.25,
+        );
+        if (!trimmed) break;
+        this.compactionState = trimmed;
+        lastState = trimmed;
+        method = "trimmed";
+        progressed = true;
+      }
+
+      this._resetContextTokens();
+
+      // 已回到阈值以下就收敛
+      if (this._estimateContextTokens() <= trigger) break;
+      // 仍然超限：降低保留量再压一轮
+      keep = Math.max(Math.floor(trigger * 0.05), Math.floor(keep / 2));
     }
 
-    // 成功 → 应用压缩状态
-    if (state) {
-      this.compactionState = state;
-      this._lastContextTokens = null; // 压缩后旧计数已过时
+    // 没有任何可压缩空间（历史还太短、尾部尚未形成边界）：
+    // 这是正常状态，不做冷却——消息继续增长后下一轮自然会可压
+    if (!progressed || !lastState) return { notice: null, method: null };
+
+    // 压不动了 → 冷却，避免每轮重新进入压缩（后续真溢出由 overflow 路径兜底）
+    this._compactStalledAt =
+      this._estimateContextTokens() >= trigger ? this.messages.length : -1;
+
+    const messagesAfter = this._outboundMessages().length;
+    const common = {
+      boundaryIndex: lastState.boundaryIndex,
+      messagesBefore,
+      messagesAfter,
+    };
+
+    if (method === "summarized") {
       return {
         notice: "上下文已压缩 — 早期轮次已摘要",
         method: "summarized",
-        modelUsed: state.modelUsed,
-        boundaryIndex: state.boundaryIndex,
-        summaryPreview: state.summaryText.slice(0, 200),
-        keptUserMessages: state.userMessages.length,
-        droppedUserMessages: state.userMessagesDropped,
-        messagesBefore,
-        messagesAfter: this._outboundMessages().length,
+        modelUsed: lastState.modelUsed,
+        summaryPreview: lastState.summaryText.slice(0, 200),
+        keptUserMessages: lastState.userMessages.length,
+        droppedUserMessages: lastState.userMessagesDropped,
+        ...common,
       };
     }
 
-    // 失败 → 裁剪降级
-    if (failed || force) {
-      const trimmed = compaction.trimState(this.messages, this.compactionState);
-      if (trimmed) {
-        this.compactionState = trimmed;
-        this._lastContextTokens = null;
-        return {
-          notice: "上下文已裁剪 — 最旧的轮次已丢弃（摘要不可用）",
-          method: "trimmed",
-          boundaryIndex: trimmed.boundaryIndex,
-          messagesBefore,
-          messagesAfter: this._outboundMessages().length,
-        };
-      }
-    }
-
-    return { notice: null, method: null };
+    return {
+      notice: "上下文已裁剪 — 最旧的轮次已丢弃（摘要不可用）",
+      method: "trimmed",
+      ...common,
+    };
   }
 
   /** 追踪文件写入工具成功产生的文件 */

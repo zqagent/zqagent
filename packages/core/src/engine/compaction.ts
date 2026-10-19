@@ -6,7 +6,7 @@
  * 持久化的对话历史永不被修改——只影响发送给模型的内容。
  */
 
-import type { Message, TokenUsage } from "./types.js";
+import type { Message, ReasoningEffort, TokenUsage } from "./types.js";
 import { contextTokens } from "./types.js";
 import type {
   ProviderClient,
@@ -170,12 +170,29 @@ export function formatTokens(tokens: number): string {
 /** 保留最近 KEEP_RECENT_FRACTION × trigger_tokens 的完整内容不变 */
 export const KEEP_RECENT_FRACTION = 0.25;
 
-/** 摘要器调用的 max_tokens */
+/**
+ * 软阈值：达到它只淘汰旧工具结果（零 LLM 成本），不触发摘要。
+ *
+ * 相对硬阈值的比例；默认 0.75 × 0.8 = 60% 窗口。大部分长任务在水位到
+ * 60% 时就被压回去，不必等到 80% 再调用一次昂贵的摘要。
+ */
+export const SOFT_THRESHOLD_RATIO = 0.75;
+
+/** 软阈值淘汰后保留的最近工具结果预算（相对硬阈值 token 数的比例） */
+export const ELIDE_KEEP_FRACTION = 0.15;
+
+/** 摘要器调用的 max_tokens（限制摘要输出长度，避免压缩本身变成一次大请求） */
 const SUMMARY_MAX_TOKENS = 3_000;
 
 /** 渲染给摘要器的 tool 结果最大字符数 */
-const SPAN_TOOL_RESULT_CLIP = 400;
-const SPAN_BUDGET_CHARS = 400_000;
+const SPAN_TOOL_RESULT_CLIP = 200;
+/**
+ * 单次摘要送入模型的 span 总字符预算。
+ *
+ * 早期轮次本来就是「将被遗忘」的内容，送给摘要器只需足以提炼结论；
+ * 过大只会让压缩本身变慢、变贵（长任务里每次压缩都要重读几十万字符）。
+ */
+const SPAN_BUDGET_CHARS = 80_000;
 
 /** 用户消息保留设置 */
 const USER_MESSAGE_CLIP = 600;
@@ -231,6 +248,29 @@ export function triggerTokens(
   return base;
 }
 
+/**
+ * 计算软阈值：达到它只淘汰旧工具结果，不调用 LLM。
+ *
+ * 未显式指定 softThresholdPct 时按硬阈值的 {@link SOFT_THRESHOLD_RATIO} 取比例
+ * （默认 0.8 × 0.75 = 60% 窗口）。显式值同样受 capTokens 约束。
+ */
+export function softTriggerTokens(
+  contextWindow: number | undefined | null,
+  thresholdPct: number = DEFAULT_THRESHOLD_PCT,
+  capTokens?: number | null,
+  softThresholdPct?: number | null,
+): number {
+  const hard = triggerTokens(contextWindow, thresholdPct, capTokens);
+  if (softThresholdPct != null && Number.isFinite(softThresholdPct) && softThresholdPct > 0) {
+    // 软阈值必须低于硬阈值，否则「先淘汰再摘要」的分层就失去意义
+    return Math.min(
+      triggerTokens(contextWindow, softThresholdPct, capTokens),
+      Math.floor(hard * 0.95),
+    );
+  }
+  return Math.floor(hard * SOFT_THRESHOLD_RATIO);
+}
+
 /** 是否需要压缩 */
 export function shouldCompact(
   signal: number,
@@ -239,6 +279,18 @@ export function shouldCompact(
   capTokens?: number | null,
 ): boolean {
   return signal >= triggerTokens(contextWindow, thresholdPct, capTokens);
+}
+
+/**
+ * 计算工具结果淘汰后应保留的字符预算。
+ *
+ * 与 token 估算保持一致（4 字符 ≈ 1 token），保证淘汰后能明显低于软阈值。
+ */
+export function elisionKeepChars(
+  hardTriggerTokens: number,
+  fraction: number = ELIDE_KEEP_FRACTION,
+): number {
+  return Math.max(4_000, Math.floor(hardTriggerTokens * fraction * 4));
 }
 
 // ==================== 边界查找 ====================
@@ -442,6 +494,7 @@ export const SUMMARY_SYSTEM_PROMPT = `你正在压缩一个 AI 协作者的会�
 
 规则：
 - 不要将完整的文件内容当作真理。只记录某个文件被读取/编辑过这一事实；协作者如果需要再次获取内容会重新读取。陈旧的文件记忆比没有记忆更糟糕。
+- 若提供了上一版摘要：只把它仍然有效的结论并入对应章节，不要整段复述或逐条转抄。
 - 要具体：路径、名称、命令、id——而不是模糊的引用。
 - 仅输出摘要章节，不附加前言。`;
 
@@ -499,6 +552,18 @@ function summarizerMessages(span: Message[], priorSummary = ""): Message[] {
   ];
 }
 
+/**
+ * 摘要器使用的推理强度。
+ *
+ * 摘要只需结构化复述，不需要深度推理；沿用主模型的 high effort 会让
+ * 每次压缩多消耗大量推理 token 与时间。可用 COMPACTION_REASONING_EFFORT 覆盖。
+ */
+export function summarizerReasoningEffort(): ReasoningEffort | undefined {
+  const v = process.env.COMPACTION_REASONING_EFFORT?.toLowerCase();
+  if (v === "low" || v === "medium" || v === "high") return v;
+  return "low";
+}
+
 /** 调用摘要器 LLM */
 export async function summarizeSpan(
   provider: ProviderClient,
@@ -508,8 +573,11 @@ export async function summarizeSpan(
   opts: StreamOpts,
 ): Promise<string> {
   const msgs = summarizerMessages(span, priorSummary);
-  // 使用非流式 complete（摘要器不需要流式输出）
-  const chunks = await provider.stream(model, msgs, [], opts);
+  // 使用非流式 complete（摘要器不需要流式输出），并限制输出长度
+  const chunks = await provider.stream(model, msgs, [], {
+    ...opts,
+    maxTokens: SUMMARY_MAX_TOKENS,
+  });
   let text = "";
   for await (const chunk of chunks) {
     if (chunk.content) text += chunk.content;
@@ -664,6 +732,317 @@ export function applyToOutbound(
   head.push({ role: "user", content: compactedBlock(state) });
 
   return [...head, ...messages.slice(boundary)];
+}
+
+// ==================== 软阈值：淘汰旧工具结果 ====================
+
+/**
+ * 永不淘汰的工具结果。
+ *
+ * - `explore`：子代理唯一的产出，丢弃等于白跑一次；
+ * - 交互类工具：承载用户的明确回答/授权，是后续行为的依据；
+ * - `todo_write`：共享进度状态，体积小且必须保持完整。
+ */
+export const ELIDE_EXEMPT_TOOLS = new Set([
+  "explore",
+  "ask_user",
+  "propose_plan",
+  "request_directory",
+  "todo_write",
+]);
+
+/** 工具结果被淘汰后的占位文本（尽量保留落盘路径，方便按需取回） */
+function elidedToolContent(m: Message): string {
+  const name = m.tool_call_name || "tool";
+  const size = m.content.length;
+  const saved = /full output saved to ([^\]]+)/.exec(m.content)?.[1]?.trim();
+  return saved
+    ? `[old tool result elided: ${name}, ${size} chars; full output saved to ${saved}]`
+    : `[old tool result elided: ${name}, ${size} chars; re-run the tool if its content is still needed]`;
+}
+
+/** 软阈值淘汰结果 */
+export interface ElideResult {
+  /** 新的消息数组（未淘汰的条目与原数组共享引用） */
+  messages: Message[];
+  /** 被淘汰的工具结果条数 */
+  elided: number;
+  /** 释放的字符数 */
+  freedChars: number;
+}
+
+/** 内容是否已是淘汰/去重占位符（避免重复处理） */
+function isPlaceholder(content: string): boolean {
+  return (
+    content.startsWith("[old tool result elided") ||
+    content.startsWith("[superseded by a later read_file")
+  );
+}
+
+/**
+ * 软阈值时优先淘汰的「一次性消费」工具结果。
+ *
+ * `git_diff` 反映的是某一时刻的工作区差异，模型读完据此得出结论后，
+ * 原文几乎不再被回看——相较于可能反复查阅的 `read_file`，它的价值衰减最快。
+ * 因此软阈值一到就先淘汰旧 diff，把保留预算让给别的内容。
+ */
+export const ONE_SHOT_TOOLS = new Set(["git_diff"]);
+
+/** 一次性结果保留的最近条数（超过的部分直接淘汰） */
+export const ONE_SHOT_KEEP_RECENT = 1;
+
+/**
+ * 淘汰较早的一次性工具结果，只保留最近 `keepRecent` 条。
+ *
+ * 纯函数、无状态；只改 outbound 视图。占位符里保留落盘路径（若有），
+ * 模型需要原文时可按路径取回或重新执行工具。
+ */
+export function applyOneShotElision(
+  messages: Message[],
+  keepRecent: number = ONE_SHOT_KEEP_RECENT,
+  tools: Set<string> = ONE_SHOT_TOOLS,
+): ElideResult {
+  const out = [...messages];
+  let seen = 0;
+  let elided = 0;
+  let freed = 0;
+
+  // 倒序：最近的先计数，超出保留条数的（更早的）才淘汰
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role !== "tool" || !tools.has(m.tool_call_name ?? "")) continue;
+    if (isPlaceholder(m.content)) continue;
+
+    seen++;
+    if (seen <= keepRecent) continue;
+
+    const placeholder = elidedToolContent(m);
+    freed += m.content.length - placeholder.length;
+    out[i] = { ...m, content: placeholder };
+    elided++;
+  }
+
+  return elided > 0
+    ? { messages: out, elided, freedChars: freed }
+    : { messages, elided: 0, freedChars: 0 };
+}
+
+/**
+ * 淘汰最旧的工具结果，直到剩余总量不超过 keepChars。
+ *
+ * 只改 outbound 视图、不动持久化历史：tool 消息的 `tool_call_id` 与
+ * 对应 assistant 的 `tool_calls` 仍然配对，协议合法。从最新往前累计，
+ * 最近的结果完整保留；必要信息可重新执行工具取回。
+ *
+ * 纯函数、无状态：会话恢复后按同样的规则重算，无需持久化淘汰结果。
+ */
+export function applyToolResultElision(
+  messages: Message[],
+  keepChars: number,
+  exempt: Set<string> = ELIDE_EXEMPT_TOOLS,
+): ElideResult {
+  // 先算总量：未超预算直接原样返回（避免无谓的数组拷贝）
+  let total = 0;
+  for (const m of messages) {
+    if (m.role === "tool" && !exempt.has(m.tool_call_name ?? "")) {
+      total += m.content.length;
+    }
+  }
+  if (total <= keepChars) return { messages, elided: 0, freedChars: 0 };
+
+  const out = [...messages];
+  let budget = 0;
+  let elided = 0;
+  let freed = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role !== "tool") continue;
+    if (exempt.has(m.tool_call_name ?? "")) continue;
+
+    // 最新一条就超预算：部分保留，不能整条丢掉
+    if (elided === 0 && budget === 0 && m.content.length > keepChars) {
+      const kept = m.content.slice(0, keepChars) + "\n…(truncated)";
+      freed += m.content.length - kept.length;
+      out[i] = { ...m, content: kept };
+      budget = keepChars;
+      continue;
+    }
+    if (budget + m.content.length <= keepChars) {
+      budget += m.content.length;
+      continue;
+    }
+    const placeholder = elidedToolContent(m);
+    freed += m.content.length - placeholder.length;
+    out[i] = { ...m, content: placeholder };
+    elided++;
+  }
+  return { messages: out, elided, freedChars: freed };
+}
+
+// ==================== 去重：同一路径的旧 read_file 结果 ====================
+
+/**
+ * 归一化工具参数里的文件路径。
+ *
+ * 只做轻量归一（分隔符、`./` 前缀、重复斜杠），不做绝对路径解析——
+ * 去重判断需要的是「同一文件」的等价，而不是工作区内的真实路径。
+ */
+export function normalizeToolPath(p: string): string {
+  let s = p.trim().replace(/\\/g, "/");
+  while (s.startsWith("./")) s = s.slice(2);
+  return s.replace(/\/{2,}/g, "/");
+}
+
+/**
+ * 可能改变文件内容的工具。
+ *
+ * `apply_patch` / `apply_unified_diff` 的补丁文本里路径不易可靠解析，
+ * `run_shell` 也可能通过 sed / git checkout 改文件——一律保守视为写操作：
+ * 宁可少淘汰，也不要让模型丢掉「改动前」的内容。
+ */
+export const MUTATING_TOOLS = new Set([
+  "write_file",
+  "replace_in_file",
+  "apply_patch",
+  "apply_unified_diff",
+  "run_shell",
+]);
+
+/** read_file 结果的行区间 */
+export interface ReadFileSpan {
+  path: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * 从 read_file 的工具结果中解析路径与行区间。
+ *
+ * 结果是 `{ path, start_line, end_line, total_lines, content }` 的 JSON；
+ * 被工具结果预算截断时会多一行前缀，先剥掉再解析。整体 JSON 已不可解析时
+ * （超长结果被头尾截断）用正则取前几个短字段——它们位于 `content` 之前。
+ */
+export function parseReadFileSpan(content: string): ReadFileSpan | null {
+  const body = content.replace(/^\[tool output truncated:[^\n]*\]\n\n/, "");
+  let path: unknown;
+  let start: unknown;
+  let end: unknown;
+  try {
+    const obj = JSON.parse(body) as Record<string, unknown>;
+    path = obj.path;
+    start = obj.start_line;
+    end = obj.end_line;
+  } catch {
+    const str = (key: string): string | undefined =>
+      new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(body)?.[1];
+    const num = (key: string): number | undefined => {
+      const m = new RegExp(`"${key}"\\s*:\\s*(\\d+)`).exec(body);
+      return m ? Number(m[1]) : undefined;
+    };
+    path = str("path");
+    start = num("start_line");
+    end = num("end_line");
+  }
+  if (typeof path !== "string" || !path) return null;
+  if (typeof start !== "number" || typeof end !== "number") return null;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return { path, start, end };
+}
+
+/** 已读取的行区间（闭区间） */
+type Span = [number, number];
+
+/** 把新区间并入集合（合并重叠/相邻区间） */
+function addSpan(spans: Span[], start: number, end: number): void {
+  spans.push([start, end]);
+  spans.sort((a, b) => a[0] - b[0]);
+  const merged: Span[] = [];
+  for (const cur of spans) {
+    const last = merged[merged.length - 1];
+    if (last && cur[0] <= last[1] + 1) {
+      last[1] = Math.max(last[1], cur[1]);
+    } else {
+      merged.push([...cur] as Span);
+    }
+  }
+  spans.length = 0;
+  spans.push(...merged);
+}
+
+/** 区间集合是否完整覆盖 [start, end] */
+function coversSpans(spans: Span[], start: number, end: number): boolean {
+  return spans.some(([a, b]) => a <= start && b >= end);
+}
+
+/** 去重结果 */
+export interface DedupResult {
+  /** 新的消息数组（未替换的条目与原数组共享引用） */
+  messages: Message[];
+  /** 被替换掉的旧读取结果条数 */
+  elided: number;
+}
+
+/**
+ * 淘汰「已被后续读取完全覆盖」的 read_file 结果。
+ *
+ * 模型经常重复读取同一文件（确认改动、回到原文），旧结果对后续推理没有
+ * 增量价值，却白占上下文。判定条件：
+ *
+ * 1. 同一路径（轻量归一后）；
+ * 2. 后续读取的区间（可能是多次读取合并后的区间）完整覆盖旧区间——
+ *    分段读同一文件的场景不会被误伤；
+ * 3. 两次读取之间没有写操作——改动前后的两次读取是不同版本，
+ *    丢掉「改动前」的内容会损失信息，此时不去重。
+ *
+ * 只改 outbound 视图，不修改持久化历史；纯函数、无状态。
+ */
+export function applyReadFileDedup(messages: Message[]): DedupResult {
+  // 快路径：少于两次 read_file 结果时无可去重
+  let candidates = 0;
+  for (const m of messages) {
+    if (m.role === "tool" && m.tool_call_name === "read_file") candidates++;
+  }
+  if (candidates < 2) return { messages, elided: 0 };
+
+  const out = [...messages];
+  /** 每个路径已被「写操作之后」的读取覆盖的行区间（倒序扫描：装的是更新的读取） */
+  const covered = new Map<string, Span[]>();
+  let elided = 0;
+
+  // 倒序：后发生的读取先登记，旧读取若被它覆盖就淘汰——保留最新内容
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+
+    if (m.role === "assistant") {
+      // 写操作让之前的读取不再可比较：清空覆盖记录（已登记的是写之后的读）
+      if (m.tool_calls?.some((tc) => MUTATING_TOOLS.has(tc.function.name))) {
+        covered.clear();
+      }
+      continue;
+    }
+
+    if (m.role !== "tool" || m.tool_call_name !== "read_file") continue;
+
+    const span = parseReadFileSpan(m.content);
+    if (!span) continue;
+    const key = normalizeToolPath(span.path);
+    const seen = covered.get(key) ?? [];
+
+    if (coversSpans(seen, span.start, span.end)) {
+      out[i] = {
+        ...m,
+        content: `[superseded by a later read_file of ${span.path} (lines ${span.start}-${span.end})]`,
+      };
+      elided++;
+      // 已被淘汰的结果不再参与后续覆盖判断
+      continue;
+    }
+
+    addSpan(seen, span.start, span.end);
+    covered.set(key, seen);
+  }
+
+  return { messages: elided > 0 ? out : messages, elided };
 }
 
 // ==================== 溢出检测 ====================

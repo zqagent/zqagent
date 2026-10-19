@@ -13,7 +13,7 @@
 [![Stars](https://img.shields.io/github/stars/zqagent/zqagent?style=social)](https://github.com/zqagent/zqagent)
 [![npm](https://img.shields.io/npm/v/@zqagent/core?label=npm&color=4f46e5)](https://www.npmjs.com/package/@zqagent/core)
 
-![zqagent CLI](./docs/assets/cli-help.svg)
+![zqagent 示範：讀檔案 → 跳出審批 → 跑測試](./docs/assets/demo.gif)
 
 ZQAgent 是一個可自架的 AI 編碼 Agent。它會自己讀程式碼、改檔案、跑指令，但**每一個有副作用的動作都會先問你**。
 

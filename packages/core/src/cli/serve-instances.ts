@@ -73,7 +73,14 @@ export function parseServeArgs(argv: string[]): Omit<ServeInstance, "dataDir"> &
 }
 
 /**
- * 合并热接入候选：显式目录优先且唯一；否则默认目录 + 发现的实例（去重）。
+ * 合并热接入候选：显式目录最优先，运行中的实例追加在后（去重）；未显式指定时
+ * 默认目录在前，再追加发现的实例。
+ *
+ * 为什么显式目录之后还要追加发现到的实例：用户给的目录未必对（最典型的是在
+ * macOS 上照抄 Linux 的 `/var/lib/zqagent`，或者猜了个 `~/.zqagent`）。此时该目录
+ * 里没有 admin.json，热接入必然失败；若不追加真实运行中的实例，link 会退回
+ * 「落盘」模式，把凭据写到一个服务根本不读的目录，命令还报「✅ 接入凭据已保存」，
+ * Hub 上却始终未接入。追加之后，错配的目录只是探测失败一次，仍能命中真正的服务。
  *
  * `fallback` 是用户显式给的 `--host/--port`（或环境变量），只作用于「默认目录」那一条；
  * 从进程反查到的实例自带真实监听参数，覆盖它——否则服务跑在非默认端口时会探测失败。
@@ -83,14 +90,54 @@ export function buildHotCandidates(
   discovered: ServeInstance[],
   fallback: { host: string; port: number },
 ): ServeInstance[] {
-  if (explicitDataDir) {
-    return [{ dataDir: path.resolve(explicitDataDir), ...fallback }];
-  }
-  const out: ServeInstance[] = [{ dataDir: path.resolve(DEFAULT_DATA_DIR), ...fallback }];
+  const out: ServeInstance[] = explicitDataDir
+    ? [{ dataDir: path.resolve(explicitDataDir), ...fallback }]
+    : [{ dataDir: path.resolve(DEFAULT_DATA_DIR), ...fallback }];
   for (const inst of discovered) {
     if (!out.some((o) => o.dataDir === inst.dataDir)) out.push(inst);
   }
   return out;
+}
+
+/** 盘符（`C:\`）或 UNC（`\\server\share`）形式的 Windows 绝对路径 */
+function isWindowsAbsolute(p: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p);
+}
+
+/** 绝对路径判定：同时接受 POSIX 与 Windows 形式（单测在 Linux 上跑 Windows 分支） */
+function isAbsolutePath(p: string): boolean {
+  return path.isAbsolute(p) || isWindowsAbsolute(p);
+}
+
+function normalizePath(p: string): string {
+  return isWindowsAbsolute(p) ? path.win32.normalize(p) : path.normalize(p);
+}
+
+/**
+ * 从一整行进程命令行里解析 serve 实例（macOS `ps` 与 Windows PowerShell 共用）。
+ *
+ * 只认显式 `--data-dir`：这两个平台都拿不到目标进程的 cwd / 环境变量，
+ * 缺省目录无法可靠回推。值允许带引号（Windows 路径常含空格），也支持
+ * `--data-dir=<路径>`。路径必须是绝对路径，否则忽略。
+ */
+export function parseServeCommandLine(line: string): ServeInstance | null {
+  // 只把独立的 `serve` token 当作子命令，避免 `--label serve` 之类误判
+  if (!/(?:^|\s)["']?serve["']?(?=\s|$)/.test(line)) return null;
+
+  const m = /--data-dir(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(.+?))(?=\s+--\w|\s*$)/.exec(line);
+  const rawDataDir = (m?.[1] ?? m?.[2] ?? m?.[3] ?? "").trim();
+  if (!rawDataDir || !isAbsolutePath(rawDataDir)) return null;
+
+  const host = /--host(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(line);
+  const rawHost = (host?.[1] ?? host?.[2] ?? host?.[3] ?? DEFAULT_SERVE_HOST).trim();
+  const portMatch = /--port(?:=|\s+)(\d+)/.exec(line);
+  const port = Number(portMatch?.[1] ?? DEFAULT_SERVE_PORT);
+
+  return {
+    dataDir: normalizePath(rawDataDir),
+    host: rawHost === "0.0.0.0" || rawHost === "::" || rawHost === "" ? DEFAULT_SERVE_HOST : rawHost,
+    port: Number.isFinite(port) && port > 0 ? port : DEFAULT_SERVE_PORT,
+  };
 }
 
 /** 读取进程工作目录（仅 Linux /proc；其他平台返回 null） */
@@ -157,37 +204,52 @@ function discoverFromProc(): ServeInstance[] {
   return out;
 }
 
-/**
- * macOS 等无 /proc 的平台：用 `ps` 尽力而为。
- *
- * 只认显式 `--data-dir`，且要求值里带 `/`（排除 `--data-dir=x` 之类的相对写法），
- * 允许路径含空格（launchd 的 `~/Library/Application Support/zqagent`）。
- * 解析不到就返回空，link 仍会退回旧行为。
- */
+/** macOS 等无 /proc 的平台：用 `ps` 尽力而为。解析不到返回空，link 退回旧行为。 */
 function discoverFromPs(): ServeInstance[] {
   const out: ServeInstance[] = [];
   const res = spawnSync("ps", ["-axo", "command="], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
   if (res.status !== 0 || !res.stdout) return out;
   for (const line of res.stdout.split("\n")) {
-    if (!line.includes(" serve")) continue;
-    const m = /--data-dir(?:=|\s+)(.+?)(?=\s+--|\s*$)/.exec(line);
-    if (!m) continue;
-    const raw = m[1].trim();
-    if (!raw || !path.isAbsolute(raw)) continue;
-    const host = /--host(?:=|\s+)(\S+)/.exec(line)?.[1] ?? DEFAULT_SERVE_HOST;
-    const port = Number(/--port(?:=|\s+)(\d+)/.exec(line)?.[1] ?? DEFAULT_SERVE_PORT);
-    out.push({
-      dataDir: path.normalize(raw),
-      host: host === "0.0.0.0" || host === "::" ? DEFAULT_SERVE_HOST : host,
-      port: Number.isFinite(port) && port > 0 ? port : DEFAULT_SERVE_PORT,
-    });
+    const inst = parseServeCommandLine(line);
+    if (inst) out.push(inst);
+  }
+  return out;
+}
+
+/**
+ * Windows：Windows 没有 `ps`，用 PowerShell 的 Win32_Process 取命令行。
+ *
+ * `zqagent serve` 既可能是 SEA 单文件 `zqagent.exe`，也可能是 `node.exe ... serve`；
+ * 只解析含独立 `serve` 且带绝对 `--data-dir` 的命令行（见 parseServeCommandLine）。
+ * PowerShell 不可用、被策略拦截或超时时返回空，不影响 link 的落盘路径。
+ */
+function discoverFromWindows(): ServeInstance[] {
+  const out: ServeInstance[] = [];
+  const script =
+    "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " +
+    "Get-CimInstance Win32_Process -Filter \"Name='zqagent.exe' OR Name='node.exe'\" " +
+    "| ForEach-Object { $_.CommandLine }";
+  const res = spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", script],
+    { encoding: "utf-8", timeout: 15000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] },
+  );
+  if (res.status !== 0 || !res.stdout) return out;
+  for (const line of res.stdout.replace(/^\uFEFF/, "").split(/\r?\n/)) {
+    const inst = parseServeCommandLine(line);
+    if (inst) out.push(inst);
   }
   return out;
 }
 
 /** 列出本机正在运行的 serve 实例（可能为空） */
 export function discoverRunningServeInstances(): ServeInstance[] {
-  const found = process.platform === "linux" ? discoverFromProc() : discoverFromPs();
+  const found =
+    process.platform === "linux"
+      ? discoverFromProc()
+      : process.platform === "win32"
+        ? discoverFromWindows()
+        : discoverFromPs();
   // 同一数据目录可能既有 systemd 主进程又有子进程，按目录去重
   const seen = new Set<string>();
   return found.filter((inst) => {

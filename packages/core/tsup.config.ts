@@ -7,7 +7,11 @@ const PKG_VERSION = (
 ).version;
 
 export default defineConfig({
-  define: { "process.env.ZQAGENT_VERSION": JSON.stringify(PKG_VERSION) },
+  define: {
+    "process.env.ZQAGENT_VERSION": JSON.stringify(PKG_VERSION),
+    // npm 包形态没有 libc 变体：固定为普通清单键（macos-arm64 / linux-x64 …）
+    "process.env.ZQAGENT_LIBC_VARIANT": JSON.stringify(""),
+  },
   // 多入口 — 匹配 package.json exports 的每个子路径
   entry: {
     index: "src/index.ts",

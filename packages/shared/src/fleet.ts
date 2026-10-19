@@ -98,6 +98,8 @@ export type FleetCmdType =
   | "git_stage"
   | "git_unstage"
   | "git_commit"
+  /** AI 生成提交说明（节点侧调用 LLM） */
+  | "git_commit_message"
   | "git_checkout"
   | "git_pull"
   | "git_push"
@@ -170,6 +172,7 @@ export const FLEET_CMD_TYPES: readonly FleetCmdType[] = [
   "git_stage",
   "git_unstage",
   "git_commit",
+  "git_commit_message",
   "git_checkout",
   "git_pull",
   "git_push",

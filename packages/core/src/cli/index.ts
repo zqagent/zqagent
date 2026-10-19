@@ -62,7 +62,7 @@ import {
   PROVIDERS,
 } from "./connection.js";
 import type { ConnectionConfig } from "./connection.js";
-import { InputRouter, countRawEscapes } from "./input.js";
+import { InputRouter, countRawEscapes, patchReadlineHistoryNav } from "./input.js";
 import { createRequire } from "module";
 import { renderBanner } from "./banner.js";
 import {
@@ -501,39 +501,10 @@ rl.on("SIGINT", () => {
 });
 
 /**
- * 修复 readline 的「子串搜索」行为：默认按上/下箭头时，readline 会把
- * 光标前的内容当作搜索前缀，导致「上箭头 → 移动光标 → 上箭头」时切不到
- * 更早的历史。这里在派发 up/down 前把光标移到行首，使前缀为空，恢复为
- * 简单的历史导航（对齐 bash 默认行为）。
+ * 修复 readline 的历史导航（前缀搜索 / 草稿保留），实现见 input.ts。
+ * 必须在 InputRouter 构造之后调用，保持 历史导航 → 粘贴守卫 → 原生 的调用链。
  */
-function patchReadlineHistoryNav(): void {
-  // readline 的 Symbol(_ttyWrite) / Symbol(_moveCursor) 只是 getter，代理到
-  // 实例属性 _ttyWrite / _moveCursor，直接覆盖实例属性即可。
-  const iface = rl as unknown as {
-    _ttyWrite: (s: string, key: unknown) => void;
-    _moveCursor: (dx: number) => void;
-    cursor: number;
-  };
-  const orig = iface._ttyWrite;
-  iface._ttyWrite = function (s: string, key: unknown) {
-    const k = key as
-      | { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean }
-      | undefined;
-    if (
-      k &&
-      (k.name === "up" || k.name === "down") &&
-      !k.ctrl &&
-      !k.meta &&
-      !k.shift
-    ) {
-      if (iface.cursor > 0) {
-        iface._moveCursor(-iface.cursor);
-      }
-    }
-    orig.call(rl, s, key);
-  };
-}
-patchReadlineHistoryNav();
+patchReadlineHistoryNav(rl);
 
 // 模块初始化收尾标记：这行出现在日志里，就说明顶层代码（含全部依赖的初始化）
 // 都已通过，之后的问题一律在 main() 内——两者的排查方向完全不同。
@@ -730,6 +701,7 @@ function buildEngine(
       parseOptionalPositiveNumber(process.env.CONTEXT_WINDOW) ??
       modelContextWindow(conn?.modelMeta, model),
     thresholdPct: parseRatio(process.env.COMPACTION_THRESHOLD_PCT),
+    softThresholdPct: parseRatio(process.env.COMPACTION_SOFT_THRESHOLD_PCT),
     capTokens:
       parseOptionalPositiveNumber(process.env.COMPACTION_CAP_TOKENS) ?? null,
     // 系统提示词按当前 agent 组装（agent prompt + 叙述规则 + 环境信息）

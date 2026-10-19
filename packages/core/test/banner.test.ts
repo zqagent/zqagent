@@ -16,8 +16,9 @@ describe("renderBrandArt", () => {
   it("按字形拼出 6 行块状字标", () => {
     const art = renderBrandArt(BRAND_TEXT);
     expect(art.split("\n")).toHaveLength(6);
-    expect(art).toContain("███████╗");
-    expect(art).toContain("╚═╝");
+    expect(art).toContain("███████");
+    // 字标只保留实心块，figlet ANSI Shadow 的边框/阴影字符不应出现
+    expect(art).not.toMatch(/[╔╗╚╝║═]/);
   });
 
   it("宽度适配 80 列终端", () => {
@@ -25,6 +26,22 @@ describe("renderBrandArt", () => {
       ...renderBrandArt(BRAND_TEXT).split("\n").map((l) => l.length),
     );
     expect(width).toBeLessThanOrEqual(79);
+  });
+
+  it("字母 Q 的右竖笔上下对齐", () => {
+    const lines = renderBrandArt("Q").split("\n");
+    // 第 2-4 行都有右竖笔，去掉行尾空白后应同宽且以实心块结尾
+    for (const row of [1, 2, 3]) {
+      const line = lines[row]!.trimEnd();
+      expect(line).toHaveLength(8);
+      expect(line.endsWith("█")).toBe(true);
+    }
+  });
+
+  it("字母 E 的中间横画与顶底对齐且同宽", () => {
+    const lines = renderBrandArt("E").split("\n");
+    expect(lines[2]).toBe(lines[0]);
+    expect(lines[4]).toBe(lines[0]);
   });
 });
 
@@ -57,7 +74,7 @@ describe("colorizeBrandArt", () => {
 describe("renderBanner", () => {
   it("无颜色时输出块状字标且无 ANSI", () => {
     const out = renderBanner({ level: 0 });
-    expect(out).toContain("███████╗");
+    expect(out).toContain("███████");
     expect(out).not.toContain("\x1b[");
     expect(out.endsWith("\n")).toBe(true);
   });

@@ -388,28 +388,43 @@ describe("控制台：项目 API", () => {
     }
   });
 
-  it("工作目录可修改（PUT /config workspaceRoot）", async () => {
+  it("初始项目可设置工作目录，设置后不可修改（PUT /config workspaceRoot）", async () => {
     const s = await makeServer("adm");
     try {
       const p = await mkProject(s, "P");
       const ws = fs.mkdtempSync(path.join(os.tmpdir(), "zqagent-ws2-"));
+      const ws2 = fs.mkdtempSync(path.join(os.tmpdir(), "zqagent-ws3-"));
       try {
-        const r = await fetch(`${s.base}/api/v1/config`, {
-          method: "PUT",
-          headers: {
-            Authorization: "Bearer adm",
-            "X-Project-Id": p.id,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ workspaceRoot: ws }),
-        });
+        const put = (workspaceRoot: string) =>
+          fetch(`${s.base}/api/v1/config`, {
+            method: "PUT",
+            headers: {
+              Authorization: "Bearer adm",
+              "X-Project-Id": p.id,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ workspaceRoot }),
+          });
+        // 首次设置：允许
+        const r = await put(ws);
         expect(r.status).toBe(200);
         expect(
           ((await r.json()) as { data: { workspaceRoot: string } }).data
             .workspaceRoot,
         ).toBe(path.resolve(ws));
+
+        // 再次修改：拒绝（已锁定）
+        const again = await put(ws2);
+        expect(again.status).toBe(409);
+        expect(
+          ((await again.json()) as { error: { code: string } }).error.code,
+        ).toBe("workspace_locked");
+
+        // 同值重复提交：幂等放行
+        expect((await put(ws)).status).toBe(200);
       } finally {
         fs.rmSync(ws, { recursive: true, force: true });
+        fs.rmSync(ws2, { recursive: true, force: true });
       }
     } finally {
       await s.close();

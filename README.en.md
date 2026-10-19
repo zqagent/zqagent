@@ -13,7 +13,7 @@
 [![Stars](https://img.shields.io/github/stars/zqagent/zqagent?style=social)](https://github.com/zqagent/zqagent)
 [![npm](https://img.shields.io/npm/v/@zqagent/core?label=npm&color=4f46e5)](https://www.npmjs.com/package/@zqagent/core)
 
-![zqagent CLI](./docs/assets/cli-help.svg)
+![zqagent demo: read a file → approve the change → tests pass](./docs/assets/demo.gif)
 
 ZQAgent is a self-hostable AI coding agent. It reads code, edits files, and runs commands on its own — but **every side-effecting action asks for your approval first**.
 

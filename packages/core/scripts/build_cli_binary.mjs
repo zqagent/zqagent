@@ -14,6 +14,8 @@
  *   node scripts/build_cli_binary.mjs                       # 当前平台 + 当前架构
  *   node scripts/build_cli_binary.mjs --arch arm64          # 交叉组装 macos/linux arm64
  *   node scripts/build_cli_binary.mjs --platform win32 --arch arm64 --node-version v22.22.3
+ *   node scripts/build_cli_binary.mjs --platform linux --arch x64 --libc glibc-217
+ *                                                           # glibc 2.17 兼容产物（CentOS 7 等）
  *
  * 注意：
  *   - 交叉组装不需要目标平台硬件（postject 只写文件、不执行），Windows 的 zip 基座由本脚本
@@ -21,10 +23,15 @@
  *   - 交叉构建会关闭 SEA 的 useCodeCache，本机构建才启用：Node 官方要求为另一个平台生成
  *     blob 时 useCodeCache / useSnapshot 必须为 false，否则会带上构建机的 V8 code cache，
  *     目标机上可能启动即崩溃。
- *   - macOS 产物的临时签名（codesign）只能在 macOS 上做；Windows 产物注入后 node.exe 自带的
- *     Authenticode 签名会失效，正式分发需用 signtool 重新签名。
+ *   - 注入会剥掉 Mach-O 原有的代码签名，而 Apple Silicon 要求至少 ad-hoc 签名才会执行
+ *     （未签名直接被内核 SIGKILL）。macOS 上用 codesign 重签；Linux 上可用 rcodesign
+ *     （apple-codesign）完成同样的 ad-hoc 签名，否则构建直接失败，不产出跑不了的产物。
+ *     Windows 产物注入后 node.exe 自带的 Authenticode 签名会失效，正式分发需用 signtool 重新签名。
  *   - 交叉组装的产物在本机无法执行，冒烟测试只能在目标平台（或对应 CI runner）上跑。
  *   - 本脚本需要 Node >= 20（SEA 从 20 起提供）。
+ *   - `--libc glibc-217` 使用 unofficial-builds 的同版本 glibc 2.17 基座，供 CentOS 7 /
+ *     麒麟 V10 等老 glibc 系统使用；产物名带 `-glibc217` 后缀，清单键为
+ *     `linux-x64-glibc217`（安装脚本按系统 glibc 选择）。
  */
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -77,6 +84,7 @@ function parseArgs(argv) {
     out: null,
     skipBuild: false,
     keepTemp: false,
+    libc: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -86,9 +94,12 @@ function parseArgs(argv) {
       return v;
     };
     switch (arg) {
+      // `pnpm run build:cli-bin -- --platform ...` 会把分隔符原样传进来
+      case "--": break;
       case "--platform": opts.platform = value(); break;
       case "--arch": opts.arch = value(); break;
       case "--node-version": opts.nodeVersion = value(); break;
+      case "--libc": opts.libc = value(); break;
       case "--out": opts.out = path.resolve(value()); break;
       case "--skip-build": opts.skipBuild = true; break;
       case "--keep-temp": opts.keepTemp = true; break;
@@ -112,7 +123,7 @@ function parseArgs(argv) {
  * 否则产出的可执行程序可能在目标机启动时崩溃——因为 blob 里带的是**构建机**编译的
  * V8 code cache）。本机同平台构建沿用 code cache 以省启动时间。
  */
-function makeBlob(bundlePath, tmpDir, useCodeCache, assets) {
+function makeBlob(bundlePath, tmpDir, useCodeCache, assets, nodePath = process.execPath) {
   const blobPath = path.join(tmpDir, "zqagent.blob");
   const configPath = path.join(tmpDir, "sea-config.json");
   const hasAssets = assets && Object.keys(assets).length > 0;
@@ -133,7 +144,7 @@ function makeBlob(bundlePath, tmpDir, useCodeCache, assets) {
     ),
   );
   log(`生成 SEA blob（useCodeCache=${useCodeCache}${hasAssets ? `, assets=${Object.keys(assets).join(",")}` : ""}）…`);
-  run(process.execPath, ["--experimental-sea-config", configPath]);
+  run(nodePath, ["--experimental-sea-config", configPath]);
   return blobPath;
 }
 
@@ -175,8 +186,66 @@ async function loadPostject() {
   }
 }
 
+/**
+ * 查找 Linux 上可用的 rcodesign（apple-codesign）。
+ * 优先级：ZQAGENT_RCODESIGN 显式指定 > PATH 中的 rcodesign。
+ */
+function findRcodesign() {
+  const explicit = process.env.ZQAGENT_RCODESIGN;
+  if (explicit) return fs.existsSync(explicit) ? explicit : null;
+  const which = spawnSync(process.platform === "win32" ? "where" : "which", ["rcodesign"], {
+    encoding: "utf8",
+  });
+  if (which.status !== 0) return null;
+  const found = which.stdout.split("\n")[0].trim();
+  return found || null;
+}
+
+/**
+ * 检查 Mach-O 是否带有效的 embedded code signature。
+ *
+ * postject 注入时会摘掉 node 原有的签名，之后必须重新签名；这一步把
+ * 「忘了签名」变成构建期错误，而不是到 macOS 上启动即崩溃。
+ */
+function verifyMachOSignature(file) {
+  const buf = fs.readFileSync(file);
+  if (buf.readUInt32LE(0) !== 0xfeedfacf) {
+    fail(`自检失败：${path.basename(file)} 不是 64 位 Mach-O`);
+  }
+  const ncmds = buf.readUInt32LE(16);
+  let off = 32;
+  for (let i = 0; i < ncmds; i++) {
+    const cmd = buf.readUInt32LE(off);
+    const size = buf.readUInt32LE(off + 4);
+    if (cmd === 0x1d /* LC_CODE_SIGNATURE */) {
+      const dataoff = buf.readUInt32LE(off + 8);
+      const datasize = buf.readUInt32LE(off + 12);
+      if (datasize < 12 || dataoff + datasize > buf.length) {
+        fail(`自检失败：${path.basename(file)} 的代码签名段损坏`);
+      }
+      if (buf.readUInt32BE(dataoff) !== 0xfade0cc0 /* CSMAGIC_EMBEDDED_SIGNATURE */) {
+        fail(`自检失败：${path.basename(file)} 的代码签名格式不正确`);
+      }
+      return;
+    }
+    if (size < 8) fail(`自检失败：${path.basename(file)} 的 load command 损坏`);
+    off += size;
+  }
+  fail(`自检失败：${path.basename(file)} 缺少代码签名（macOS 会拒绝启动）`);
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
+
+  if (opts.libc) {
+    const normalized = String(opts.libc).replace(/-/g, "").toLowerCase();
+    if (normalized !== "glibc217") fail(`不支持的 --libc：${opts.libc}（可用：glibc-217）`);
+    if (opts.libc && opts.arch !== "x64") {
+      fail("glibc 2.17 兼容基座目前只提供 linux x64");
+    }
+    if (opts.platform !== "linux") fail("--libc 只适用于 linux 产物");
+    opts.libc = normalized;
+  }
 
   const nodeMajor = Number(process.versions.node.split(".")[0]);
   if (nodeMajor < 20) {
@@ -188,6 +257,7 @@ async function main() {
   }
 
   const isNative = opts.platform === process.platform && opts.arch === process.arch;
+  const libcSuffix = opts.libc === "glibc217" ? "-glibc217" : "";
   const bundlePath = path.join(ROOT, "dist", "sea", "zqagent.cjs");
   const outPath =
     opts.out ??
@@ -195,14 +265,18 @@ async function main() {
       ROOT,
       "release",
       "cli",
-      `zqagent-${DISPLAY_PLATFORM[opts.platform]}-${opts.arch}${opts.platform === "win32" ? ".exe" : ""}`,
+      `zqagent-${DISPLAY_PLATFORM[opts.platform]}-${opts.arch}${libcSuffix}${opts.platform === "win32" ? ".exe" : ""}`,
     );
 
   if (opts.skipBuild) {
     if (!fs.existsSync(bundlePath)) fail(`--skip-build 需要已存在的 ${bundlePath}`);
   } else {
     log("打包单文件 bundle（tsup.sea.config.ts）…");
-    run("npm", ["run", "build:sea"]);
+    // 变体标记在构建期注入 bundle：更新器据此选择清单键（linux-x64-glibc217），
+    // 否则 CentOS 7 上的节点升级时会下载回不兼容的官方 glibc 产物。
+    run("npm", ["run", "build:sea"], {
+      env: { ...process.env, ZQAGENT_LIBC_VARIANT: opts.libc ?? "" },
+    });
   }
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zqagent-sea-"));
@@ -216,18 +290,39 @@ async function main() {
       log(`⚠️  未能内嵌 ripgrep（${err.message}）；grep 将回退纯 Node 扫描器`);
     }
 
-    const blobPath = makeBlob(bundlePath, tmpDir, isNative, assets);
+    // glibc 兼容产物必须用同版本的兼容基座来生成 blob：SEA blob 与基座的
+    // V8 版本绑定，不能用构建机（或另一个 libc 变体）的 node 代劳。
+    const needsDownloadedBase = !isNative || Boolean(opts.libc);
     let baseBinary;
-    if (isNative) {
-      baseBinary = process.execPath;
-    } else {
+    if (needsDownloadedBase) {
       try {
-        baseBinary = await fetchNodeBase(opts.nodeVersion, opts.platform, opts.arch, tmpDir, log);
+        baseBinary = await fetchNodeBase(
+          opts.nodeVersion,
+          opts.platform,
+          opts.arch,
+          tmpDir,
+          log,
+          opts.libc ? "glibc-217" : undefined,
+        );
       } catch (err) {
         fail(err.message);
       }
+    } else {
+      baseBinary = process.execPath;
     }
-    log(`基座：${baseBinary}${isNative ? "（本机 node）" : "（下载的发行包）"}`);
+    log(
+      `基座：${baseBinary}${needsDownloadedBase ? `（下载的发行包${opts.libc ? "，glibc 2.17 兼容" : ""}）` : "（本机 node）"}`,
+    );
+
+    // 只有本机构建、且基座就是当前 node 时才启用 code cache：官方要求为其它
+    // 目标生成 blob 时关闭，否则可能带上构建机的 V8 cache。
+    //
+    // 生成 blob 的 node 必须是当前机器能执行的：跨平台/跨架构的基座（如 Linux 上
+    // 构建 darwin 产物）根本无法在本机运行。只有「同平台同架构、仅 libc 变体不同」
+    // 时才用下载的基座，保证 blob 与基座的 V8 版本一致。
+    const baseRunsHere = opts.platform === process.platform && opts.arch === process.arch;
+    const blobNode = needsDownloadedBase && baseRunsHere ? baseBinary : process.execPath;
+    const blobPath = makeBlob(bundlePath, tmpDir, isNative && !opts.libc, assets, blobNode);
 
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
     fs.copyFileSync(baseBinary, outPath);
@@ -249,8 +344,22 @@ async function main() {
       if (process.platform === "darwin") {
         run("codesign", ["--sign", "-", "--force", outPath]);
       } else {
-        log("提示：macOS 产物需在 macOS 上执行 `codesign --sign - --force <file>` 后才能运行");
+        // 注入已剥掉 node 自带的签名，Apple Silicon 上未签名的可执行文件会被内核
+        // 直接 SIGKILL。Linux 没有 codesign，用 rcodesign 做等价的 ad-hoc 签名。
+        const rcodesign = findRcodesign();
+        if (!rcodesign) {
+          fail(
+            "macOS 产物必须签名后才能运行，但当前平台没有 codesign 也没有 rcodesign。\n" +
+              "  方案一：在 macOS 上构建（CI 的 macos runner 即可）；\n" +
+              "  方案二：在 Linux 安装 rcodesign 后重试：\n" +
+              "    https://github.com/indygreg/apple-platform-rs/releases\n" +
+              "    （或用 ZQAGENT_RCODESIGN 指定可执行文件路径）",
+          );
+        }
+        log(`重新签名（ad-hoc，${path.basename(rcodesign)}）…`);
+        run(rcodesign, ["sign", outPath]);
       }
+      verifyMachOSignature(outPath);
     } else if (opts.platform === "win32") {
       log(
         "提示：注入破坏了 node.exe 自带的 Authenticode 签名（postject 的 " +
@@ -261,7 +370,9 @@ async function main() {
     verifyInjection(outPath, blobPath);
 
     const sizeMb = (fs.statSync(outPath).size / 1024 / 1024).toFixed(1);
-    log(`✓ 完成：${path.relative(ROOT, outPath)}（${sizeMb} MB，${opts.platform}-${opts.arch}）`);
+    log(
+      `✓ 完成：${path.relative(ROOT, outPath)}（${sizeMb} MB，${opts.platform}-${opts.arch}${opts.libc ? "，glibc 2.17 兼容" : ""}）`,
+    );
   } finally {
     if (opts.keepTemp) log(`保留临时目录：${tmpDir}`);
     else fs.rmSync(tmpDir, { recursive: true, force: true });

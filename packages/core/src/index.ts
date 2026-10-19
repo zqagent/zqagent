@@ -203,8 +203,18 @@ export interface CreateEngineOpts {
   contextWindow?: number;
   /** 压缩触发阈值比例（占窗口比例，默认 0.8） */
   thresholdPct?: number;
+  /**
+   * 软阈值比例（占窗口比例）：达到它只淘汰旧工具结果，不调用 LLM。
+   * 缺省为硬阈值的 75%（即默认 60% 窗口）。
+   */
+  softThresholdPct?: number;
   /** 压缩触发阈值绝对上限（token 数；缺省不限制） */
   capTokens?: number | null;
+  /**
+   * 超预算工具结果的落盘目录（可选）。
+   * 缺省为状态目录下的 `tool-results`；Server 建议指向租户/会话目录。
+   */
+  toolResultDir?: string;
   /** LLM 请求日志根目录（按日期分目录），不传则不记录 */
   logDir?: string;
 }
@@ -237,7 +247,9 @@ export function createDefaultEngine(opts: CreateEngineOpts): TurnEngine {
     subagentHookFactory,
     contextWindow,
     thresholdPct,
+    softThresholdPct,
     capTokens,
+    toolResultDir,
     logDir,
   } = opts;
 
@@ -273,6 +285,7 @@ export function createDefaultEngine(opts: CreateEngineOpts): TurnEngine {
     provider: effectiveProvider,
     model,
     hookFactory: subagentHookFactory,
+    toolResultDir,
   });
 
   // 3. 权限引擎
@@ -301,7 +314,9 @@ export function createDefaultEngine(opts: CreateEngineOpts): TurnEngine {
     hook,
     contextWindow,
     thresholdPct,
+    softThresholdPct,
     capTokens,
+    toolResultDir,
   });
 
   return engine;

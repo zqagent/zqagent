@@ -48,7 +48,15 @@ export interface HubNodeSummary {
   version?: string;
   /** 节点自报主 IP（新版节点上报；旧版缺省） */
   ip?: string;
-  projects: Array<{ id: string; name: string; sessionCount?: number; running?: number; waiting?: number }>;
+  projects: Array<{
+    id: string;
+    name: string;
+    sessionCount?: number;
+    running?: number;
+    waiting?: number;
+    /** 项目工作目录（节点上报；旧版节点缺省） */
+    workspaceRoot?: string | null;
+  }>;
   /** 项目/会话汇总（新版节点上报；旧版为 null） */
   totals?: HubNodeTotals | null;
   /**
@@ -67,6 +75,41 @@ export interface HubNodeDetail extends HubNodeSummary {
   fleetId: string;
   fleetName: string;
   createdAt: string;
+}
+
+/** 项目总览里的单条任务（会话） */
+export interface HubProjectTask {
+  sessionId: string;
+  name: string | null;
+  status: string;
+  lastUserMessage: string | null;
+  lastCompletedAt: string | null;
+}
+
+/** 项目总览行：跨节点聚合的项目视图 */
+export interface HubProjectRow {
+  projectId: string;
+  name: string;
+  workspaceRoot: string | null;
+  nodeId: string;
+  nodeLabel: string;
+  fleetId: string;
+  fleetName: string;
+  online: boolean;
+  sessionCount: number;
+  running: number;
+  waiting: number;
+  /** 该项目下所有任务最近一次成功完成的时刻（ISO 8601；从未完成时 null） */
+  lastCompletedAt: string | null;
+  /** 任务总数（tasks 最多回传前 20 条） */
+  taskCount: number;
+  tasks: HubProjectTask[];
+}
+
+/** 项目总览分页响应 */
+export interface HubProjectPage {
+  total: number;
+  items: HubProjectRow[];
 }
 
 export interface HubPlan {
@@ -433,6 +476,21 @@ export async function hubListNodes(
   fleetId: string,
 ): Promise<HubNodeSummary[]> {
   return (await req(baseUrl, token, `/api/hub/fleets/${fleetId}/nodes`)) as HubNodeSummary[];
+}
+
+/** 项目总览（跨节点聚合，按最后完成任务时间倒序分页） */
+export async function hubListProjects(
+  baseUrl: string,
+  token: string,
+  opts: { limit?: number; offset?: number } = {},
+): Promise<HubProjectPage> {
+  const limit = Math.min(Math.max(Math.trunc(opts.limit ?? 20), 1), 200);
+  const offset = Math.max(Math.trunc(opts.offset ?? 0), 0);
+  return (await req(
+    baseUrl,
+    token,
+    `/api/hub/projects?limit=${limit}&offset=${offset}`,
+  )) as HubProjectPage;
 }
 
 /** 单节点详情（状态/统计/项目/归属） */

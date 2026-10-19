@@ -208,6 +208,78 @@ export interface ServerHandle {
   close: () => void;
 }
 
+/** 端口自动递增的上限（8787 起最多试到 8807） */
+const PORT_FALLBACK_LIMIT = 20;
+
+/**
+ * 监听端口；被占用时依次尝试下一个，直到成功或用尽次数。
+ *
+ * 默认的 8787 在开发机上常被别的服务占用。此前 `server.listen` 没有 error 处理，
+ * EADDRINUSE 会变成未捕获异常，进程直接崩溃；装成 launchd/systemd 服务后表现为
+ * 无限重启、日志里刷同样的堆栈，用户只看到「服务 · 未运行」。
+ *
+ * 实际监听端口会写入 `{dataDir}/server-port`：plist/unit 里写的是初始端口，
+ * 自动递增后安装脚本与 `zqagent update --status` 要读这个文件才知道真实地址。
+ *
+ * 导出仅为测试（limit 用于缩小重试范围）。
+ */
+export function listenWithPortFallback(
+  server: Server,
+  startPort: number,
+  host: string,
+  dataDir: string,
+  limit: number = PORT_FALLBACK_LIMIT,
+): Promise<number> {
+  return new Promise((resolve, reject) => {
+    let attempts = 0;
+
+    const tryListen = (port: number): void => {
+      // 上一次失败的 listen 会遗留一个 'listening' 回调（Node 不清理它），
+      // 再次 listen 成功时两个回调都会触发，先执行的那个还带着旧端口号。
+      // 这里每次尝试前清掉，保证只收到本次的回调。
+      server.removeAllListeners("listening");
+      const onError = (err: NodeJS.ErrnoException): void => {
+        // 只对「端口被占」递增；EACCES（<1024 需特权）等应直接失败
+        if (err.code === "EADDRINUSE" && attempts < limit) {
+          attempts += 1;
+          const next = port + 1;
+          console.warn(`[server] 端口 ${port} 已被占用（EADDRINUSE），尝试 ${next} …`);
+          tryListen(next);
+          return;
+        }
+        server.removeListener("error", onError);
+        console.error(
+          `[server] 无法监听 ${host}:${port}：${err.message}` +
+            (err.code === "EADDRINUSE"
+              ? `（已尝试 ${attempts + 1} 个端口均被占用）`
+              : ""),
+        );
+        reject(err);
+      };
+
+      server.once("error", onError);
+      server.listen(port, host, () => {
+        server.removeListener("error", onError);
+        // 以实际绑定结果为准，而不是闭包里的 port
+        const addr = server.address();
+        const actualPort = typeof addr === "object" && addr !== null ? addr.port : port;
+        if (actualPort !== startPort) {
+          console.warn(`[server] 已改用端口 ${actualPort}（原定 ${startPort} 被占用）`);
+        }
+        try {
+          fs.mkdirSync(dataDir, { recursive: true });
+          fs.writeFileSync(path.join(dataDir, "server-port"), `${actualPort}\n`);
+        } catch {
+          // 仅用于安装脚本探测，写不了不影响服务本身
+        }
+        resolve(actualPort);
+      });
+    };
+
+    tryListen(startPort);
+  });
+}
+
 /** 启动 Server（组装 + 监听）。返回句柄；调用方负责在退出时 close()。 */
 export function startServer(opts: StartServerOptions = {}): ServerHandle {
   const dataDir = path.resolve(opts.dataDir ?? env("DATA_DIR") ?? DEFAULT_DATA_DIR);
@@ -495,11 +567,11 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
 
-  const ready = new Promise<ServerReadyInfo>((resolve) => {
-    server.listen(port, host, () => {
+  const ready = new Promise<ServerReadyInfo>((resolve, reject) => {
+    listenWithPortFallback(server, port, host, dataDir).then((actualPort) => {
       const info: ServerReadyInfo = {
         host,
-        port,
+        port: actualPort,
         dataDir,
         adminKey,
         fleetNodeId: fleet ? fleet.getNodeId() : undefined,
@@ -514,7 +586,7 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
       // 监听成功后再启动更新调度，避免端口占用失败时留下定时器
       updater?.start();
       resolve(info);
-    });
+    }, reject);
   });
 
   return {

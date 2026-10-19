@@ -36,12 +36,21 @@ const PLATFORM_NAMES: Record<string, string> = {
   win32: "windows",
 };
 
-/** 当前进程对应的清单键，如 `macos-arm64`、`linux-x64` */
+/**
+ * 构建期注入的 libc 变体标记：普通产物为空，glibc 2.17 兼容产物为 `glibc217`。
+ *
+ * 由 build_cli_binary.mjs 在 `--libc glibc-217` 时传入环境变量，tsup 在打包时
+ * 把 `process.env.ZQAGENT_LIBC_VARIANT` 替换成字面量，因此运行时不受环境影响。
+ */
+const LIBC_VARIANT = process.env.ZQAGENT_LIBC_VARIANT ?? "";
+
+/** 当前进程对应的清单键，如 `macos-arm64`、`linux-x64`、`linux-x64-glibc217` */
 export function platformKey(
   platform: string = process.platform,
   arch: string = process.arch,
 ): string {
-  return `${PLATFORM_NAMES[platform] ?? platform}-${arch}`;
+  const base = `${PLATFORM_NAMES[platform] ?? platform}-${arch}`;
+  return LIBC_VARIANT ? `${base}-${LIBC_VARIANT}` : base;
 }
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;

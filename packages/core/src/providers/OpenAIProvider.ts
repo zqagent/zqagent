@@ -70,6 +70,11 @@ export interface StreamOpts {
    */
   signal?: AbortSignal;
   /**
+   * 最大输出 token 数（可选）。用于摘要器等轻量请求限制输出长度；
+   * Responses → max_output_tokens，Chat → max_tokens / max_completion_tokens。
+   */
+  maxTokens?: number;
+  /**
    * 内部字段：流空闲看门狗（由 `stream()` 注入，各流路径复用）。
    * 引擎侧无需感知，请勿在 `stream()` 之外构造。
    */
@@ -402,6 +407,8 @@ export class OpenAIProvider implements ProviderClient {
           ...(opts.reasoningEffort && !this._isDeepSeek(model)
             ? { reasoning: { effort: opts.reasoningEffort } }
             : {}),
+          // 限制输出长度（摘要器等轻量请求）
+          ...(opts.maxTokens ? { max_output_tokens: opts.maxTokens } : {}),
           stream: true,
         } as any, requestOptions)) as unknown as AsyncIterable<unknown>;
         // 流内失败（HTTP 200 + response.failed）的降级在此处理
@@ -523,6 +530,12 @@ export class OpenAIProvider implements ProviderClient {
         // 推理强度：DeepSeek 不支持，跳过
         ...(opts.reasoningEffort && !this._isDeepSeek(model)
           ? { reasoning_effort: opts.reasoningEffort }
+          : {}),
+        // 限制输出长度：o 系列 / gpt-5 推理模型仅支持 max_completion_tokens
+        ...(opts.maxTokens
+          ? isReasoningModel(model)
+            ? { max_completion_tokens: opts.maxTokens }
+            : { max_tokens: opts.maxTokens }
           : {}),
         stream: true,
         // 要求返回 Token 用量统计（在流结束前的一个 chunk 中携带）

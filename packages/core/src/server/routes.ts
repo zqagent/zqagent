@@ -59,6 +59,7 @@ import {
   projectGitPush,
   projectGitRepos,
 } from "./projectOps.js";
+import { generateGitCommitMessage } from "./gitCommitMessage.js";
 import { listShellTasks, killShellTask } from "../tools/shell.js";
 import { buildToolCatalog } from "./toolsCatalog.js";
 import { loadServerMcpConfigs } from "./mcpConfig.js";
@@ -707,11 +708,22 @@ export function createApp(
         tenant.provider = tenant.provider ?? {};
         // 多供应商（整体替换 + 选定当前项；会把 active 同步到 provider/model）
         applyProvidersPatch(tenant, raw as Record<string, unknown>);
-        // workspaceRoot：非空字符串=设为工作目录；空串=清除（回退每会话沙箱）
+        // workspaceRoot：初始项目（未设置）可添加一次；一旦设定即锁定，不可再改/清除
         if (typeof raw.workspaceRoot === "string") {
           const ws = raw.workspaceRoot.trim();
-          if (ws) tenant.workspaceRoot = path.resolve(ws);
-          else delete tenant.workspaceRoot;
+          const next = ws ? path.resolve(ws) : undefined;
+          if (tenant.workspaceRoot) {
+            // 同值视为幂等；不同值（含空串清除）一律拒绝
+            if (next !== tenant.workspaceRoot) {
+              throw new ApiError(
+                409,
+                "workspace_locked",
+                "该项目已设置工作目录，不能再修改",
+              );
+            }
+          } else if (next) {
+            tenant.workspaceRoot = next;
+          }
         }
         // name：非空字符串即改名（项目 id 不变）
         if (typeof raw.name === "string" && raw.name.trim()) {
@@ -1129,6 +1141,25 @@ export function createApp(
             ),
           );
         } catch (e) {
+          throw new ApiError(400, "bad_request", e instanceof Error ? e.message : String(e));
+        }
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["git", "commit-message"],
+      fn: async (_req, res, { tenant, body }) => {
+        const raw = (body ?? {}) as { repo?: unknown };
+        try {
+          const message = await generateGitCommitMessage({
+            store,
+            tenant,
+            workspaceRoot: tenant.workspaceRoot ?? null,
+            repo: String(raw.repo ?? "") || undefined,
+          });
+          ok(res, { message });
+        } catch (e) {
+          if (e instanceof ApiError) throw e;
           throw new ApiError(400, "bad_request", e instanceof Error ? e.message : String(e));
         }
       },

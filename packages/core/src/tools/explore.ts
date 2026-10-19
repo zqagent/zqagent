@@ -39,6 +39,8 @@ export function buildExplorerEngine(opts: {
    * 会回调给调用方渲染（如 CLI 的 SubagentHook）；不传则与旧版一致（静默）。
    */
   hook?: EngineHook;
+  /** 超预算工具结果的落盘目录（与主引擎共用，保持租户隔离） */
+  toolResultDir?: string;
 }): TurnEngine {
   const registry = new ToolRegistry();
 
@@ -66,6 +68,7 @@ export function buildExplorerEngine(opts: {
     instructions: EXPLORER_INSTRUCTIONS,
     maxIterations: parseMaxIterations(process.env.EXPLORE_MAX_ITERATIONS, 30),
     hook: opts.hook,
+    toolResultDir: opts.toolResultDir,
   });
 }
 
@@ -87,6 +90,8 @@ export function makeExploreTool(opts: {
    * explore 会同时运行），共享同一个渲染器会互相串状态、输出交错难辨。
    */
   hookFactory?: () => EngineHook;
+  /** 超预算工具结果的落盘目录（透传给子引擎） */
+  toolResultDir?: string;
 }) {
   return async function explore(args: Record<string, unknown>): Promise<Record<string, unknown>> {
     const task = String(args.task ?? "");
@@ -98,6 +103,7 @@ export function makeExploreTool(opts: {
       model: opts.model,
       readonlyRegistrars: opts.readonlyRegistrars,
       hook: opts.hookFactory?.(),
+      toolResultDir: opts.toolResultDir,
     });
 
     let report = "";
@@ -143,6 +149,8 @@ export function registerExploreTool(
     readonlyRegistrars?: (registry: ToolRegistry) => void;
     /** 子引擎钩子工厂（可选）：见 makeExploreTool */
     hookFactory?: () => EngineHook;
+    /** 超预算工具结果的落盘目录（透传给子引擎） */
+    toolResultDir?: string;
   },
 ): void {
   const exploreFunc = makeExploreTool(opts);

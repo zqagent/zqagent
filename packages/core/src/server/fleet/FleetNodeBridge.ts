@@ -73,6 +73,27 @@ const READONLY_CMD_TYPES = new Set<string>([
 const CMD_CACHE_TTL_MS = 1500;
 
 /**
+ * 会话状态类事件：命中时让只读缓存失效。
+ *
+ * 这些事件由引擎内部产生（审批挂起、提问、turn 结束等），不会经过写指令，
+ * 因此 `_invalidateReadonlyCache()` 不会被触发。若不清缓存，控制台收到事件后
+ * 立刻 `get_state` 会命中 1.5s 内的旧快照（审批/提问/状态仍为空），界面要等
+ * 手动刷新或 30s 兜底轮询才更新——新会话首个审批最容易命中（LLM 响应快）。
+ */
+const STATE_CHANGING_EVENTS = new Set<string>([
+  "turn_start",
+  "turn_end",
+  "permission_required",
+  "ask_user_question",
+  "plan_proposed",
+  "directory_requested",
+  "error",
+  "interrupted",
+  "queue_steering",
+  "session_named",
+]);
+
+/**
  * 只读查询并发上限。
  *
  * 原实现把所有指令挂在一条串行链上：一个慢查询（大历史 `get_events` 回执 512KB 等）
@@ -380,6 +401,21 @@ export class FleetNodeBridge {
     this.cmdResultCache.clear();
   }
 
+  /**
+   * 会话快照缓存失效（事件/通知驱动的状态变化）。
+   *
+   * 与写操作不同，这些变化只影响会话相关查询；文件树 / Git 等重查询的缓存
+   * 保持有效，避免多会话并行运行时把整个只读缓存反复清空。
+   */
+  private _invalidateSessionCache(): void {
+    this.writeEpoch += 1;
+    for (const key of [...this.cmdResultCache.keys()]) {
+      if (/^(get_state|get_events|list_sessions|get_session_states)\|/.test(key)) {
+        this.cmdResultCache.delete(key);
+      }
+    }
+  }
+
   close(): void {
     this.closing = true;
     if (this.usageTimer) {
@@ -409,6 +445,9 @@ export class FleetNodeBridge {
 
   /** 通知广播（SessionManager 注入的 notify 回调） */
   notify(tenantId: string, ev: NotifyEvent): void {
+    // 状态/审批/提问通知同样意味着会话快照已变化（且不经过写指令），
+    // 让会话缓存失效，保证随后的事件触发刷新能读到最新状态。
+    this._invalidateSessionCache();
     const payload =
       ev.kind === "approval_request"
         ? {
@@ -425,6 +464,9 @@ export class FleetNodeBridge {
 
   /** 事件桥接（SessionManager 注入的 onEvent 回调）；发布按窗口批量合并 */
   onEvent(tenantId: string, sessionId: string, entry: EventEntry): void {
+    // 状态类事件由引擎内部产生，不经写指令：先失效会话缓存，
+    // 控制台收到事件后拉取的 get_state 才不会是审批/提问出现前的旧快照。
+    if (STATE_CHANGING_EVENTS.has(entry.type)) this._invalidateSessionCache();
     // 运行统计（轻量计数，随 info 上报）
     if (entry.type === "turn_end") this.stats.turns += 1;
     else if (entry.type === "tool_finished") this.stats.toolCalls += 1;

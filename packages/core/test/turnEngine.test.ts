@@ -6,6 +6,9 @@
  * 未知工具、Provider 错误、最大迭代次数、steering 注入与流式中断。
  */
 import { describe, it, expect } from "vitest";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import {
   TurnEngine,
   EventType,
@@ -23,6 +26,7 @@ import type {
   EngineHook,
   CompactionDoneInfo,
   CompactionStartInfo,
+  Message,
 } from "../src/index.js";
 
 const usage: TokenUsage = { input: 5, output: 3, cacheRead: 0, cacheWrite: 0 };
@@ -32,9 +36,15 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 脚本化 Provider：按调用次数依次返回预设的 chunk 序列 */
 class ScriptedProvider implements ProviderClient {
   calls = 0;
+  /** 最近一次请求的 outbound 消息（用于断言压缩/淘汰后的实际视图） */
+  lastMessages: Message[] = [];
   constructor(private script: StreamChunk[][]) {}
 
-  async stream(): Promise<AsyncIterable<StreamChunk>> {
+  async stream(
+    _model: string,
+    messages: Message[],
+  ): Promise<AsyncIterable<StreamChunk>> {
+    this.lastMessages = messages;
     const chunks = this.script[this.calls++] ?? [];
     return (async function* () {
       for (const c of chunks) yield c;
@@ -75,6 +85,8 @@ function buildEngine(opts: {
   mode?: Mode;
   maxIterations?: number;
   contextWindow?: number;
+  softThresholdPct?: number;
+  messages?: Message[];
   hook?: EngineHook;
   register?: (r: ToolRegistry) => void;
 }): TurnEngine {
@@ -108,6 +120,10 @@ function buildEngine(opts: {
     instructions: "test system",
     maxIterations: opts.maxIterations ?? 10,
     ...(opts.contextWindow !== undefined ? { contextWindow: opts.contextWindow } : {}),
+    ...(opts.softThresholdPct !== undefined
+      ? { softThresholdPct: opts.softThresholdPct }
+      : {}),
+    ...(opts.messages ? { messages: opts.messages } : {}),
     ...(opts.hook ? { hook: opts.hook } : {}),
   });
 }
@@ -573,5 +589,326 @@ describe("TurnEngine contextWindow 选项", () => {
     expect(engine.compactionState).toBeNull();
     // 2 次 provider 调用：工具轮 + 最终回答（无压缩）
     expect((engine.provider as ScriptedProvider).calls).toBe(2);
+  });
+});
+
+describe("TurnEngine 工具结果预算", () => {
+  it("超大工具结果被截断并落盘，避免撑爆下一轮上下文", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zq-engine-budget-"));
+    const prevDir = process.env.TOOL_RESULT_DIR;
+    process.env.TOOL_RESULT_DIR = dir;
+    try {
+      const engine = buildEngine({
+        script: [
+          [toolChunk([{ id: "big1", name: "big_tool", arguments: {} }])],
+          [textChunk("完成")],
+        ],
+        register: (r) =>
+          r.register(
+            () => ({ stdout: "x".repeat(100_000), exit_code: 0 }),
+            { ...fakeToolMeta, capabilities: ["big_tool"] },
+            {
+              type: "function",
+              function: {
+                name: "big_tool",
+                description: "returns huge output",
+                parameters: { type: "object", properties: {} },
+              },
+            },
+          ),
+      });
+
+      await collect(engine, "run");
+
+      const toolMsg = engine.messages.find((m) => m.role === "tool")!;
+      expect(toolMsg.content).toContain("tool output truncated");
+      expect(toolMsg.content.length).toBeLessThan(30_000);
+
+      const files = fs.readdirSync(dir);
+      expect(files).toHaveLength(1);
+      // 落盘的是完整 JSON（比原始 stdout 多出字段名与缩进）
+      expect(
+        fs.readFileSync(path.join(dir, files[0]!), "utf-8").length,
+      ).toBeGreaterThan(100_000);
+    } finally {
+      if (prevDir === undefined) delete process.env.TOOL_RESULT_DIR;
+      else process.env.TOOL_RESULT_DIR = prevDir;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("TurnEngine 压缩收敛", () => {
+  it("压缩后水位降到阈值以下时只压一轮，不再反复进入压缩", async () => {
+    // 20 轮历史（~21K tokens），窗口 10K → 阈值 8K
+    const history: Message[] = [{ role: "system", content: "sys" }];
+    for (let i = 0; i < 20; i++) {
+      history.push({ role: "user", content: `任务 ${i} ` + "a".repeat(2000) });
+      history.push({ role: "assistant", content: "已处理 " + "b".repeat(2000) });
+    }
+
+    const engine = buildEngine({
+      contextWindow: 10_000,
+      messages: history,
+      script: [
+        [textChunk("这是结构化摘要")], // 摘要器
+        [textChunk("最终回答")], // 压缩后的下一轮
+      ],
+    });
+
+    const events = await collect(engine, "继续");
+    const compacted = events.filter((e) => e.type === EventType.COMPACTED);
+
+    expect(compacted).toHaveLength(1);
+    expect(compacted[0]!.data.method).toBe("summarized");
+    expect(engine.compactionState).not.toBeNull();
+    // 只调用 2 次：摘要器 + 压缩后的正式回答
+    expect((engine.provider as ScriptedProvider).calls).toBe(2);
+  });
+});
+
+describe("TurnEngine 软阈值淘汰", () => {
+  /** 构造一轮带工具调用的历史（tool 结果大小可控） */
+  function historyWithTools(count: number, size: number): Message[] {
+    const out: Message[] = [{ role: "system", content: "sys" }];
+    for (let i = 0; i < count; i++) {
+      out.push({ role: "user", content: `步骤 ${i}` });
+      out.push({
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: `call_${i}`,
+            type: "function",
+            function: { name: "read_file", arguments: "{}" },
+          },
+        ],
+      });
+      out.push({
+        role: "tool",
+        tool_call_id: `call_${i}`,
+        tool_call_name: "read_file",
+        content: `${i}:` + "x".repeat(size),
+      });
+    }
+    return out;
+  }
+
+  it("达到软阈值时淘汰旧工具结果，且不触发 LLM 摘要", async () => {
+    // 窗口 10K：硬阈值 8K，软阈值显式设为 10% = 1K
+    const engine = buildEngine({
+      contextWindow: 10_000,
+      softThresholdPct: 0.1,
+      messages: historyWithTools(10, 2000),
+      script: [[textChunk("完成")]],
+    });
+
+    const events = await collect(engine, "继续");
+    const provider = engine.provider as ScriptedProvider;
+    const toolMsgs = provider.lastMessages.filter((m) => m.role === "tool");
+
+    // 最旧的被替换为占位符，最近的保持完整
+    expect(toolMsgs[0]!.content).toContain("old tool result elided");
+    expect(toolMsgs[toolMsgs.length - 1]!.content).toContain("9:");
+    // 淘汰是视图层行为：不调用摘要、不产生 COMPACTED
+    expect(events.some((e) => e.type === EventType.COMPACTED)).toBe(false);
+    expect(engine.compactionState).toBeNull();
+    expect(provider.calls).toBe(1);
+  });
+
+  it("淘汰只影响 outbound，持久化历史保持完整", async () => {
+    const history = historyWithTools(6, 2000);
+    const engine = buildEngine({
+      contextWindow: 10_000,
+      softThresholdPct: 0.1,
+      messages: history,
+      script: [[textChunk("完成")]],
+    });
+
+    await collect(engine, "继续");
+    const firstTool = engine.messages.find((m) => m.role === "tool")!;
+    expect(firstTool.content).toBe("0:" + "x".repeat(2000));
+    expect(firstTool.content).not.toContain("elided");
+  });
+
+  it("COMPACTION_ELIDE=0 时关闭淘汰", async () => {
+    const prev = process.env.COMPACTION_ELIDE;
+    process.env.COMPACTION_ELIDE = "0";
+    try {
+      const engine = buildEngine({
+        contextWindow: 10_000,
+        softThresholdPct: 0.1,
+        messages: historyWithTools(10, 2000),
+        script: [[textChunk("完成")]],
+      });
+
+      await collect(engine, "继续");
+      const toolMsgs = (engine.provider as ScriptedProvider).lastMessages.filter(
+        (m) => m.role === "tool",
+      );
+      expect(toolMsgs[0]!.content).not.toContain("old tool result elided");
+    } finally {
+      if (prev === undefined) delete process.env.COMPACTION_ELIDE;
+      else process.env.COMPACTION_ELIDE = prev;
+    }
+  });
+});
+
+describe("TurnEngine 重复读取去重", () => {
+  const readMsg = (
+    id: string,
+    path: string,
+    start: number,
+    end: number,
+    content: string,
+  ): Message => ({
+    role: "tool",
+    tool_call_id: id,
+    tool_call_name: "read_file",
+    content: JSON.stringify({
+      path,
+      start_line: start,
+      end_line: end,
+      total_lines: 500,
+      content,
+    }),
+  });
+
+  it("同一文件被重复读取时，旧结果在 outbound 中被替换", async () => {
+    const history: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "看看 a.ts" },
+      readMsg("r1", "src/a.ts", 1, 100, "旧内容"),
+      { role: "user", content: "再读一次确认" },
+      readMsg("r2", "src/a.ts", 1, 100, "新内容"),
+    ];
+    const engine = buildEngine({
+      messages: history,
+      script: [[textChunk("完成")]],
+    });
+
+    await collect(engine, "继续");
+    const toolMsgs = (engine.provider as ScriptedProvider).lastMessages.filter(
+      (m) => m.role === "tool",
+    );
+
+    // 旧的被替换，最新的保留
+    expect(toolMsgs[0]!.content).toContain("superseded by a later read_file");
+    expect(toolMsgs[1]!.content).toContain("新内容");
+    // 持久化历史保持完整
+    const persisted = engine.messages.filter((m) => m.role === "tool");
+    expect(persisted[0]!.content).toContain("旧内容");
+  });
+
+  it("COMPACTION_DEDUP=0 时关闭去重", async () => {
+    const prev = process.env.COMPACTION_DEDUP;
+    process.env.COMPACTION_DEDUP = "0";
+    try {
+      const engine = buildEngine({
+        messages: [
+          { role: "system", content: "sys" },
+          readMsg("r1", "src/a.ts", 1, 100, "旧内容"),
+          readMsg("r2", "src/a.ts", 1, 100, "新内容"),
+        ],
+        script: [[textChunk("完成")]],
+      });
+
+      await collect(engine, "继续");
+      const toolMsgs = (engine.provider as ScriptedProvider).lastMessages.filter(
+        (m) => m.role === "tool",
+      );
+      expect(toolMsgs[0]!.content).toContain("旧内容");
+    } finally {
+      if (prev === undefined) delete process.env.COMPACTION_DEDUP;
+      else process.env.COMPACTION_DEDUP = prev;
+    }
+  });
+});
+
+describe("TurnEngine 软阈值优先淘汰旧 git_diff", () => {
+  const diffMsg = (id: string, size: number): Message => ({
+    role: "tool",
+    tool_call_id: id,
+    tool_call_name: "git_diff",
+    content: `${id}:` + "d".repeat(size),
+  });
+
+  function historyWithDiffs(count: number, size: number): Message[] {
+    const out: Message[] = [{ role: "system", content: "sys" }];
+    for (let i = 0; i < count; i++) {
+      out.push({ role: "user", content: `看第 ${i} 个 diff` });
+      out.push({
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: `d${i}`,
+            type: "function",
+            function: { name: "git_diff", arguments: "{}" },
+          },
+        ],
+      });
+      out.push(diffMsg(`d${i}`, size));
+    }
+    return out;
+  }
+
+  it("软阈值时只保留最近一条 diff，其余被淘汰", async () => {
+    // 窗口 10K：硬阈值 8K；软阈值显式 10% = 1K
+    const engine = buildEngine({
+      contextWindow: 10_000,
+      softThresholdPct: 0.1,
+      messages: historyWithDiffs(8, 2000),
+      script: [[textChunk("完成")]],
+    });
+
+    await collect(engine, "继续");
+    const diffs = (engine.provider as ScriptedProvider).lastMessages.filter(
+      (m) => m.role === "tool",
+    );
+
+    const kept = diffs.filter((m) => !m.content.includes("old tool result elided"));
+    const elided = diffs.filter((m) => m.content.includes("old tool result elided"));
+    expect(kept).toHaveLength(1);
+    expect(kept[0]!.content).toContain("d7:");
+    expect(elided.length).toBeGreaterThan(0);
+    // 淘汰是视图层行为：不调摘要
+    expect(engine.compactionState).toBeNull();
+    expect((engine.provider as ScriptedProvider).calls).toBe(1);
+  });
+
+  it("淘汰旧 diff 后已回到软阈值以下时，不再淘汰其他工具结果", async () => {
+    // read_file 是最旧的一条：若走通用淘汰（保留预算约 4800 字符）会被淘汰；
+    // 优先淘汰旧 diff 后水位已回落，它应当完整保留。
+    const history: Message[] = [
+      { role: "system", content: "sys" },
+      {
+        role: "tool",
+        tool_call_id: "r1",
+        tool_call_name: "read_file",
+        content: JSON.stringify({
+          path: "src/a.ts",
+          start_line: 1,
+          end_line: 40,
+          total_lines: 40,
+          content: "r".repeat(800),
+        }),
+      },
+      ...historyWithDiffs(3, 2000).slice(1),
+    ];
+    const engine = buildEngine({
+      contextWindow: 10_000,
+      softThresholdPct: 0.1,
+      messages: history,
+      script: [[textChunk("完成")]],
+    });
+
+    await collect(engine, "继续");
+    const outbound = (engine.provider as ScriptedProvider).lastMessages;
+    const readFile = outbound.find(
+      (m) => m.role === "tool" && m.content.includes('"path":"src/a.ts"'),
+    );
+    expect(readFile).toBeTruthy();
+    expect(readFile!.content).not.toContain("elided");
   });
 });

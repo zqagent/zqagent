@@ -19,9 +19,12 @@ export function sha256Of(buf) {
   return createHash("sha256").update(buf).digest("hex");
 }
 
-/** 发行包文件名主干，例如 node-v22.22.3-win-x64 */
-export function distStem(version, platform, arch) {
-  return `node-v${String(version).replace(/^v/, "")}-${DIST_PLATFORM[platform]}-${arch}`;
+/**
+ * 发行包文件名主干，例如 node-v22.22.3-win-x64。
+ * `libc` 用于 unofficial-builds 的兼容构建（Linux），例如 node-v22.23.2-linux-x64-glibc-217。
+ */
+export function distStem(version, platform, arch, libc) {
+  return `node-v${String(version).replace(/^v/, "")}-${DIST_PLATFORM[platform]}-${arch}${libc ? `-${libc}` : ""}`;
 }
 
 /**
@@ -82,33 +85,63 @@ export function extractFromZipEntry(zipPath, entryName, destPath) {
   throw new Error(`zip 中找不到 ${entryName}：${zipPath}`);
 }
 
-/** 下载发行包并对照 SHASUMS256.txt 校验，返回存档路径与校验和 */
-export async function downloadDistArchive(
-  version,
-  platform,
-  arch,
-  destDir,
-  log = () => {},
-) {
-  const stem = distStem(version, platform, arch);
-  const archive = `${stem}.${platform === "win32" ? "zip" : "tar.gz"}`;
-  const baseUrl = `https://nodejs.org/dist/v${String(version).replace(/^v/, "")}`;
-
-  const url = `${baseUrl}/${archive}`;
-  log(`下载基座 ${archive} : `, url);
-
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(
-      `下载失败（HTTP ${res.status}）：${baseUrl}/${archive}\n` +
-        `若该版本没有 ${platform}-${arch} 发行包，请用 --node-version 指定另一版本。`,
+/**
+ * 下载源基址（按序尝试）。
+ *
+ * 官方 nodejs.org 在部分网络下连接超时或极慢；镜像同样提供完整发行包与
+ * SHASUMS256.txt，可继续做同一套校验。`ZQAGENT_NODE_MIRROR` 可指定自定义
+ * 基址（支持 `{version}` 占位符，否则自动拼 `/v<version>`），用于离线内网。
+ */
+export function nodeDistBases(version, libc) {
+  const v = `v${String(version).replace(/^v/, "")}`;
+  const bases = [];
+  const custom = (process.env.ZQAGENT_NODE_MIRROR ?? "").trim();
+  if (custom) {
+    const base = custom.replace(/\/$/, "");
+    bases.push(base.includes("{version}") ? base.replaceAll("{version}", v) : `${base}/${v}`);
+  }
+  if (libc) {
+    // glibc 2.17 兼容构建只由 unofficial-builds 提供（官方发行包要求 glibc >= 2.28）
+    bases.push(`https://unofficial-builds.nodejs.org/download/release/${v}`);
+  } else {
+    bases.push(
+      `https://nodejs.org/dist/${v}`,
+      `https://mirrors.aliyun.com/nodejs-release/${v}`,
+      `https://mirrors.huaweicloud.com/nodejs/${v}`,
+      `https://cdn.npmmirror.com/binaries/node/${v}`,
     );
   }
+  return [...new Set(bases)];
+}
+
+/** 下载失败的底层原因（Node fetch 只报 “fetch failed”，cause 里才有 ECONNRESET 等） */
+function describeFetchError(err) {
+  const cause = err?.cause;
+  const code = cause?.code ?? cause?.errors?.find((e) => e?.code)?.code;
+  return `${err?.message ?? err}${code ? `（${code}）` : ""}`;
+}
+
+/** 日志里显示源主机；自定义镜像可能不是合法 URL，退化为原字符串 */
+function hostOf(baseUrl) {
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return baseUrl;
+  }
+}
+
+/** 下载单个源：发行包 + 校验和，校验通过才落盘；失败抛错 */
+async function downloadFromBase(baseUrl, archive, destDir) {
+  const res = await fetch(`${baseUrl}/${archive}`, {
+    signal: AbortSignal.timeout(180000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const buf = Buffer.from(await res.arrayBuffer());
 
-  const sumsRes = await fetch(`${baseUrl}/SHASUMS256.txt`);
-  if (!sumsRes.ok)
-    throw new Error(`下载 SHASUMS256.txt 失败（HTTP ${sumsRes.status}）`);
+  const sumsRes = await fetch(`${baseUrl}/SHASUMS256.txt`, {
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!sumsRes.ok) throw new Error(`SHASUMS256.txt HTTP ${sumsRes.status}`);
   const expected = (await sumsRes.text())
     .split("\n")
     .map((line) => line.trim().split(/\s+/))
@@ -116,14 +149,48 @@ export async function downloadDistArchive(
   if (!expected) throw new Error(`SHASUMS256.txt 中找不到 ${archive}`);
   const actual = sha256Of(buf);
   if (actual !== expected) {
-    throw new Error(
-      `${archive} 校验和不匹配（期望 ${expected}，实际 ${actual}）`,
-    );
+    throw new Error(`校验和不匹配（期望 ${expected}，实际 ${actual}）`);
   }
 
   const archivePath = path.join(destDir, archive);
   fs.writeFileSync(archivePath, buf);
-  return { archive, archivePath, sha256: actual };
+  return { archivePath, sha256: actual };
+}
+
+/** 下载发行包并对照 SHASUMS256.txt 校验，返回存档路径与校验和 */
+export async function downloadDistArchive(
+  version,
+  platform,
+  arch,
+  destDir,
+  log = () => {},
+  libc,
+) {
+  const stem = distStem(version, platform, arch, libc);
+  const archive = `${stem}.${platform === "win32" ? "zip" : "tar.gz"}`;
+  const bases = nodeDistBases(version, libc);
+  const errors = [];
+
+  for (const baseUrl of bases) {
+    log(`下载基座 ${archive} : `, `${baseUrl}/${archive}`);
+    try {
+      const { archivePath, sha256 } = await downloadFromBase(
+        baseUrl,
+        archive,
+        destDir,
+      );
+      return { archive, archivePath, sha256 };
+    } catch (err) {
+      errors.push(`${hostOf(baseUrl)}: ${describeFetchError(err)}`);
+      log(`⚠️  基座源 ${hostOf(baseUrl)} 失败：${describeFetchError(err)}`);
+    }
+  }
+
+  throw new Error(
+    `所有 Node 基座下载源均失败（${errors.join("; ")}）\n` +
+      `若该版本没有 ${platform}-${arch} 发行包，请用 --node-version 指定另一版本；` +
+      `也可用 ZQAGENT_NODE_MIRROR 指定可用镜像（支持 {version} 占位符）。`,
+  );
 }
 
 /** 下载 Node 官方发行包，解压后返回其中的 node 可执行文件路径 */
@@ -133,14 +200,16 @@ export async function fetchNodeBase(
   arch,
   tmpDir,
   log = () => {},
+  libc,
 ) {
-  const stem = distStem(version, platform, arch);
+  const stem = distStem(version, platform, arch, libc);
   const { archive, archivePath } = await downloadDistArchive(
     version,
     platform,
     arch,
     tmpDir,
     log,
+    libc,
   );
 
   if (platform === "win32") {
