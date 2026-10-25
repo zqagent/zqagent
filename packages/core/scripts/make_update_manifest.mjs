@@ -21,13 +21,20 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash, sign } from "node:crypto";
 
-/** 产物文件名 → 清单平台键 */
+/**
+ * 产物文件名 → 清单平台键。
+ *
+ * 文件名统一带版本号与构建时间（`-v<version>-<yyyymmdd>-<HHmmss>`，见
+ * build_cli_binary.mjs）。清单键只取平台/架构/变体，版本与日期段忽略——
+ * 清单里的 `version` 字段才是权威版本，客户端据此比较。
+ */
+const STAMP = "(?:-v\\d+\\.\\d+\\.\\d+(?:[-.][0-9A-Za-z.]+)?-\\d{8}(?:-\\d{6})?)?";
 const PLATFORM_PATTERNS = [
-  [/^zqagent-macos-(arm64|x64)$/, (m) => `macos-${m[1]}`],
+  [new RegExp(`^zqagent-macos-(arm64|x64)${STAMP}$`), (m) => `macos-${m[1]}`],
   // glibc 2.17 兼容产物（CentOS 7 等）：键必须与 install.sh / platformKey() 一致
-  [/^zqagent-linux-(arm64|x64)-glibc217$/, (m) => `linux-${m[1]}-glibc217`],
-  [/^zqagent-linux-(arm64|x64)$/, (m) => `linux-${m[1]}`],
-  [/^zqagent-windows-(arm64|x64)(?:\.exe)?$/, (m) => `windows-${m[1]}`],
+  [new RegExp(`^zqagent-linux-(arm64|x64)-glibc217${STAMP}$`), (m) => `linux-${m[1]}-glibc217`],
+  [new RegExp(`^zqagent-linux-(arm64|x64)${STAMP}$`), (m) => `linux-${m[1]}`],
+  [new RegExp(`^zqagent-windows-(arm64|x64)${STAMP}\\.exe$`), (m) => `windows-${m[1]}`],
 ];
 
 function usage() {

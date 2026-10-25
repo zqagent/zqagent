@@ -152,6 +152,17 @@ ZQAgent 的前提是**模型輸出不可信**：
 [context-compaction](./docs/en/context-compaction.md) ·
 [llm-connection](./docs/en/llm-connection-troubleshooting.md)
 
+## 交流
+
+使用者群（微信群）：掃碼加入，提問、回報 Bug、提需求都可以，不需要加好友。
+群滿會自動切換到新群，同一個碼長期有效。
+
+<img src="https://agent.cd-zq.com/wecom-group.png" alt="ZQAgent 使用者群 QR Code" width="200" />
+
+站點上的說明與群規：<https://agent.cd-zq.com/community/>
+
+不想用微信：到 [GitHub Issues](https://github.com/__OSS_REPO__/issues) 提問。
+
 ## 開發
 
 ```bash

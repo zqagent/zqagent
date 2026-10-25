@@ -21,7 +21,7 @@ import {
   type FleetBatchSubCmd,
 } from "@zqagent/shared/fleet";
 import { dispatchFleetCommand, type FleetDeps } from "./FleetCommands.js";
-import { encodeOutbound, fromWireCommand, type FleetOutbound } from "./fleetWire.js";
+import { encodeOutbound, fromWireCommand, guardAckSize, type FleetOutbound } from "./fleetWire.js";
 import { WssLink } from "./wssLink.js";
 import { dbgMark, dbgMs, dbgNow } from "../dbgTrace.js"; // [dbg] 临时调试，定位后可删
 import { allProjectSummaries, ensureNodeId, lastUserMessage } from "../projects.js";
@@ -30,11 +30,15 @@ import {
   approvalInputFromData,
   approvalToMarkdownTable,
 } from "../../engine/approvalView.js";
+import { sumAgg } from "../usage.js";
 
 /**
  * 只读查询指令：控制台页签恢复会并发重复调用，节点侧做并发去重 + 短 TTL 结果复用，
  * 避免同一批查询被反复实算（长时间占满事件循环会错过心跳与回执）。
  * 白名单仅含无副作用的查询；写操作（submit_turn/approval_answer/…）始终逐条执行。
+ *
+ * `zip_download` 虽然也是只读，但**刻意不在这里**：它的回执可能带几 MB 的
+ * base64，进结果缓存等于把归档整份留在内存里，代价远大于它省下的那点实算。
  */
 const READONLY_CMD_TYPES = new Set<string>([
   "ping",
@@ -43,6 +47,7 @@ const READONLY_CMD_TYPES = new Set<string>([
   "get_node_llm",
   "list_node_llm_models",
   "get_usage_summary",
+  "get_llm_balance",
   "get_usage_records",
   "get_usage_pricing",
   "list_projects",
@@ -50,6 +55,11 @@ const READONLY_CMD_TYPES = new Set<string>([
   "get_session_states",
   "get_state",
   "get_events",
+  "get_session_turns",
+  "get_session_turn_reply",
+  // 变更追踪的只读查询（restore 是写操作，不在此列，必须逐条执行）
+  "get_session_changes",
+  "get_session_change_diff",
   "get_config",
   "list_models",
   "list_dirs",
@@ -377,6 +387,14 @@ export class FleetNodeBridge {
     dbgMark(`recv:${env.type}`, `reqId=${env.reqId}`); // [dbg] 记录入队时刻，用于区分排队等待 vs 执行耗时
     // 只读查询（含「全为只读子指令」的 batch）：有限并发，慢查询不再阻塞轻量指令。
     // 写操作：严格串行，上一条执行完（含回执发布）再执行下一条。
+    //
+    // `self_update` 特例：status/check 是纯读（只拉清单比对版本），按只读取并发，
+    // 否则 UI 的「检查更新」会被前面的长写指令（如 run_command 最长 300s）堵住；
+    // install 会下载并重启进程，必须走写链串行。
+    if (env.type === "self_update" && String(env.payload?.action ?? "status") !== "install") {
+      this._runReadonly(run);
+      return;
+    }
     if (READONLY_CMD_TYPES.has(env.type) || this._isReadonlyBatch(env)) {
       this._runReadonly(run);
       return;
@@ -410,7 +428,9 @@ export class FleetNodeBridge {
   private _invalidateSessionCache(): void {
     this.writeEpoch += 1;
     for (const key of [...this.cmdResultCache.keys()]) {
-      if (/^(get_state|get_events|list_sessions|get_session_states)\|/.test(key)) {
+      if (
+        /^(get_state|get_events|get_session_turns|get_session_turn_reply|list_sessions|get_session_states)\|/.test(key)
+      ) {
         this.cmdResultCache.delete(key);
       }
     }
@@ -555,6 +575,12 @@ export class FleetNodeBridge {
     this._publishInfo();
   }
 
+  /** 本地改名后把 status（含 label）与 info 立即重发，控制台不必等下一次周期上报 */
+  republishLabel(): void {
+    this._send({ kind: "status", status: this._status(this.isConnected()) });
+    this._publishInfo();
+  }
+
   // ===================== 内部 =====================
 
   private _status(online: boolean): FleetStatus {
@@ -570,7 +596,13 @@ export class FleetNodeBridge {
     };
   }
 
-  /** 用量汇总（供控制面账户级聚合）：总量 + 最近 40 天按天 */
+  /**
+   * 用量汇总（供控制面账户级聚合）：总量 + 最近 40 天按天 + 最近 40 天按项目。
+   *
+   * 按项目这一维是为控制台「今日 / 最近 30 天消耗拆到每个项目」服务的：
+   * 账本里的汇总只存了按天、按项目两个独立维度，交叉项只能现算，因此这里
+   * 从明细聚合后随 info 一起上报（Hub 按 (节点, 项目, 天) 覆盖写入，天然幂等）。
+   */
   private _usagePayload(): Record<string, unknown> | undefined {
     const ledger = this.opts.deps.manager.usageLedger();
     if (!ledger) return undefined;
@@ -578,15 +610,46 @@ export class FleetNodeBridge {
     const days: Record<string, unknown> = {};
     const keys = Object.keys(r.byDay).sort().slice(-40);
     for (const k of keys) days[k] = r.byDay[k];
+
+    // 项目维度：与 byDay 同一窗口，避免两处口径不一致
+    const from = keys[0] ?? "";
+    const to = keys[keys.length - 1] ?? "";
+    const projects: Record<string, unknown> = {};
+    if (from && to) {
+      for (const [projectId, byDay] of Object.entries(
+        ledger.projectByDay({ from, to }),
+      )) {
+        projects[projectId] = { total: sumAgg(Object.values(byDay)), byDay };
+      }
+    }
+
     return {
       since: r.since,
       total: r.total,
       legacy: r.legacy ?? null,
       byDay: days,
+      projects,
     };
   }
 
+  /**
+   * 上报 info（项目/会话快照）。
+   *
+   * 失败必须留痕：这是控制台「项目列表」的唯一数据源，静默失败会表现为
+   * 「这台节点永远没有任何项目」，且只能靠网关 detail=null 才发现。
+   * 同时用 try 包住，避免一次读盘异常中断 `_onUp` 后续的状态通知。
+   */
   private _publishInfo(): void {
+    try {
+      this._publishInfoNow();
+    } catch (e) {
+      console.warn(
+        `[fleet] 节点 ${this.nodeId} 上报 info 失败: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  private _publishInfoNow(): void {
     // 聚合每个项目的会话计数（运行中 / 待审批待回答），供控制台总览。
     const totals = { projects: 0, sessions: 0, running: 0, waiting: 0 };
     /**
@@ -603,6 +666,7 @@ export class FleetNodeBridge {
       name: string | null;
       status: string;
       lastUserMessage: string | null;
+      lastStartedAt: string | null;
       lastCompletedAt: string | null;
     }> = [];
     const projects = allProjectSummaries(this.opts.deps.store).map((p) => {
@@ -618,6 +682,8 @@ export class FleetNodeBridge {
             name: s.name ?? null,
             status: s.status,
             lastUserMessage: lastUserMessage(s),
+            // 控制面按它排「最近在跑什么」，运行中的长任务才不会被排到后面
+            lastStartedAt: s.lastStartedAt ?? null,
             // 控制面的聚合邮件靠它判断「这台机器最近有没有在干活」；
             // 状态跃迁可能被 info 节流跳过，完成时间不会。
             lastCompletedAt: s.lastCompletedAt ?? null,
@@ -630,7 +696,15 @@ export class FleetNodeBridge {
       totals.sessions += p.sessionCount;
       totals.running += running;
       totals.waiting += waiting;
-      return { id: p.id, name: p.name, sessionCount: p.sessionCount, running, waiting };
+      return {
+        id: p.id,
+        name: p.name,
+        sessionCount: p.sessionCount,
+        running,
+        waiting,
+        // 控制台项目列表要展示工作目录（Hub 落盘快照后即可离线查看）
+        workspaceRoot: p.workspaceRoot ?? null,
+      };
     });
     this._send({
       kind: "info",
@@ -821,7 +895,15 @@ export class FleetNodeBridge {
     const stamped = { ...ack, reqId: env.reqId, type: env.type };
     const json = JSON.stringify(stamped);
     const __t1 = dbgNow(); // [dbg]
-    this._send({ kind: "ack", clientId: env.clientId, ack: stamped });
+    // 回执超单帧时降级为明确的错误回执：否则 encodeFrame 抛错 → 写链吞掉 →
+    // 控制台只能等到 15s 超时，且看不出真实原因是「结果太大」。
+    const payload = guardAckSize(stamped, json);
+    if (payload !== stamped) {
+      console.warn(
+        `[fleet] ${env.type} 回执 ${(json.length / 1024 / 1024).toFixed(1)}MB 超过单帧上限，已降级为错误回执`,
+      );
+    }
+    this._send({ kind: "ack", clientId: env.clientId, ack: payload });
     dbgMs(
       "publishAck",
       __t0, // [dbg]

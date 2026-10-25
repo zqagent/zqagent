@@ -9,6 +9,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as zlib from "node:zlib";
 
@@ -121,6 +122,60 @@ function describeFetchError(err) {
   return `${err?.message ?? err}${code ? `（${code}）` : ""}`;
 }
 
+/**
+ * 代理地址（CI 里境外源常需要走代理）。
+ *
+ * Node 内置的 fetch 不遵循 HTTP_PROXY/HTTPS_PROXY —— 有代理时会绕过它直连然后超时，
+ * 所以在设了代理时改用 curl 下载（curl 原生读这两个变量）。curl 不可用则回退 fetch。
+ */
+function proxyUrl() {
+  return (
+    process.env.HTTPS_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy ||
+    ""
+  );
+}
+
+/** 带代理地取一个 URL 的完整内容（curl 与 fetch 的错误语义保持一致） */
+async function httpGet(url, timeoutMs) {
+  if (proxyUrl()) {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zq-dl-"));
+    const out = path.join(tmpDir, "body");
+    try {
+      const res = spawnSync(
+        "curl",
+        [
+          "-fsSL",
+          // 走代理时 HTTP/2 多路复用常被掐断（curl 报 18），强制单路 HTTP/1.1
+          "--http1.1",
+          // 多个构建作业并发时带宽被分摊，180s 下不完 45MB+ 的基座；放宽时限并重试
+          "--retry",
+          "3",
+          "--retry-delay",
+          "3",
+          "--retry-all-errors",
+          "--max-time",
+          String(Math.ceil(timeoutMs / 1000)),
+          "-o",
+          out,
+          url,
+        ],
+        { encoding: "utf8" },
+      );
+      if (res.error) throw res.error;
+      if (res.status !== 0) throw new Error(`HTTP 请求失败（curl 退出码 ${res.status}）`);
+      return fs.readFileSync(out);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
 /** 日志里显示源主机；自定义镜像可能不是合法 URL，退化为原字符串 */
 function hostOf(baseUrl) {
   try {
@@ -132,17 +187,9 @@ function hostOf(baseUrl) {
 
 /** 下载单个源：发行包 + 校验和，校验通过才落盘；失败抛错 */
 async function downloadFromBase(baseUrl, archive, destDir) {
-  const res = await fetch(`${baseUrl}/${archive}`, {
-    signal: AbortSignal.timeout(180000),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const buf = Buffer.from(await res.arrayBuffer());
-
-  const sumsRes = await fetch(`${baseUrl}/SHASUMS256.txt`, {
-    signal: AbortSignal.timeout(30000),
-  });
-  if (!sumsRes.ok) throw new Error(`SHASUMS256.txt HTTP ${sumsRes.status}`);
-  const expected = (await sumsRes.text())
+  const buf = await httpGet(`${baseUrl}/${archive}`, 600000);
+  const expected = (await httpGet(`${baseUrl}/SHASUMS256.txt`, 30000))
+    .toString("utf8")
     .split("\n")
     .map((line) => line.trim().split(/\s+/))
     .find(([, name]) => name === archive)?.[0];

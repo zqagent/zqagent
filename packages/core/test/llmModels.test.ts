@@ -13,8 +13,11 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as http from "http";
 import type { AddressInfo } from "net";
 import {
+  describeModelFetchFailure,
   fetchModels,
+  fetchModelsWithDiagnostics,
   isChatModel,
+  modelListCandidates,
   probeModel,
 } from "../src/providers/models.js";
 import { isReasoningModel } from "../src/providers/diagnostics.js";
@@ -204,5 +207,119 @@ describe("probeModel", () => {
     seen.length = 0;
     await probeModel(base, "sk-test", "qwen3.8-flash");
     expect(seen.some((u) => u.endsWith("/chat/completions"))).toBe(true);
+  });
+});
+
+// ===================== 多路径候选与失败诊断 =====================
+
+/** 只对指定路径返回 200 + 模型列表；其余路径按 map 给状态码 */
+let pathServer: http.Server;
+let pathBase = "";
+const hits: string[] = [];
+
+beforeAll(async () => {
+  pathServer = http.createServer((req, res) => {
+    const url = req.url ?? "";
+    hits.push(url);
+    const json = (code: number, body: unknown) => {
+      res.writeHead(code, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    // 模拟 DeepSeek：GET /models 可用，/v1/models 不存在
+    if (url === "/models") {
+      json(200, { object: "list", data: [{ id: "deepseek-flash" }, { id: "deepseek-v4-pro" }] });
+      return;
+    }
+    if (url === "/v1/models") {
+      json(404, { error: { message: "not found" } });
+      return;
+    }
+    json(404, { error: { message: "资源不存在" } });
+  });
+  await new Promise<void>((resolve) => pathServer.listen(0, "127.0.0.1", resolve));
+  const { port } = pathServer.address() as AddressInfo;
+  pathBase = `http://127.0.0.1:${port}`;
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve) => pathServer.close(() => resolve()));
+});
+
+describe("modelListCandidates", () => {
+  it("Base URL 只填到域名时，同时尝试 /models 与 /v1/models", () => {
+    const c = modelListCandidates("https://api.deepseek.com");
+    expect(c[0]).toBe("https://api.deepseek.com/models");
+    expect(c).toContain("https://api.deepseek.com/v1/models");
+  });
+
+  it("Base URL 带 /v1 时，先去版本段再试根路径（DeepSeek 官方 /models 不在 /v1 下）", () => {
+    const c = modelListCandidates("https://api.deepseek.com/v1");
+    expect(c).toContain("https://api.deepseek.com/v1/models");
+    expect(c).toContain("https://api.deepseek.com/models");
+    expect(c.indexOf("https://api.deepseek.com/v1/models")).toBeLessThan(
+      c.indexOf("https://api.deepseek.com/models"),
+    );
+  });
+
+  it("兼容模式前缀与 /api 网关都会被尝试", () => {
+    expect(modelListCandidates("https://dashscope.aliyuncs.com/compatible-mode/v1")).toEqual(
+      expect.arrayContaining([
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
+        "https://dashscope.aliyuncs.com/models",
+      ]),
+    );
+    expect(modelListCandidates("https://gw.example.com")).toEqual(
+      expect.arrayContaining([
+        "https://gw.example.com/api/v1/models",
+        "https://gw.example.com/api/models",
+      ]),
+    );
+  });
+
+  it("候选去重且数量有上限（避免一次刷新打太多次）", () => {
+    const c = modelListCandidates("https://api.example.com/v1");
+    expect(new Set(c).size).toBe(c.length);
+    expect(c.length).toBeLessThanOrEqual(6);
+  });
+});
+
+describe("fetchModelsWithDiagnostics", () => {
+  it("带 /v1 的 Base URL 在 /v1/models 404 时，回退到根 /models 成功", async () => {
+    const diag = await fetchModelsWithDiagnostics(`${pathBase}/v1`, "sk-test");
+    expect(diag.result?.models).toEqual(["deepseek-flash", "deepseek-v4-pro"]);
+    expect(diag.result?.endpoint).toBe(`${pathBase}/models`);
+  });
+
+  it("全部失败时回报每个尝试过的端点与状态码", async () => {
+    const diag = await fetchModelsWithDiagnostics(`${pathBase}/nope`, "sk-test");
+    expect(diag.result).toBeNull();
+    expect(diag.attempts.length).toBeGreaterThan(1);
+    expect(diag.attempts.every((a) => a.status !== undefined)).toBe(true);
+    const msg = describeModelFetchFailure(`${pathBase}/nope`, diag);
+    expect(msg).toContain("已尝试");
+    expect(msg).toContain("HTTP 404");
+  });
+
+  it("鉴权失败仍会试完候选（有些网关对不存在的路径也回 401），最终按 Key 问题提示", async () => {
+    const authServer = http.createServer((req, res) => {
+      hits.push(`auth${req.url}`);
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Authentication Fails" } }));
+    });
+    await new Promise<void>((resolve) => authServer.listen(0, "127.0.0.1", resolve));
+    const { port } = authServer.address() as AddressInfo;
+    hits.length = 0;
+    try {
+      const diag = await fetchModelsWithDiagnostics(`http://127.0.0.1:${port}/v1`, "sk-bad");
+      expect(diag.authFailed).toBe(true);
+      // 不再早停：/v1/models 401 后继续试 /models 等组合
+      expect(diag.attempts.length).toBeGreaterThan(1);
+      expect(hits.length).toBe(diag.attempts.length);
+      const msg = describeModelFetchFailure(`http://127.0.0.1:${port}/v1`, diag);
+      expect(msg).toContain("API Key 无效");
+      expect(msg).toContain("Authentication Fails");
+    } finally {
+      await new Promise<void>((resolve) => authServer.close(() => resolve()));
+    }
   });
 });

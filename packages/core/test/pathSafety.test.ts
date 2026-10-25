@@ -9,6 +9,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import {
+  isInsideRelative,
   isWithinRoot,
   resolveEntryWithinRoot,
   resolveWithinRoot,
@@ -89,5 +90,27 @@ describe("resolveEntryWithinRoot", () => {
 
   it("父目录逃逸时返回 null", () => {
     expect(resolveEntryWithinRoot(workspace, "../x.txt")).toBeNull();
+  });
+});
+
+describe("isInsideRelative", () => {
+  it("普通相对路径在界内", () => {
+    expect(isInsideRelative("a/b.txt")).toBe(true);
+    expect(isInsideRelative("")).toBe(true);
+  });
+
+  it("名为 ..foo 的条目不算逃逸（不能用 startsWith(\"..\") 判断）", () => {
+    expect(isInsideRelative("..foo")).toBe(true);
+    expect(isInsideRelative(path.join("..foo", "a.txt"))).toBe(true);
+  });
+
+  it("恰好 .. 或以 .. 加分隔符开头视为逃逸", () => {
+    expect(isInsideRelative("..")).toBe(false);
+    expect(isInsideRelative(`..${path.sep}x`)).toBe(false);
+  });
+
+  it("绝对路径（含 Windows 跨盘符）视为逃逸", () => {
+    expect(isInsideRelative(path.resolve("/tmp/x"))).toBe(false);
+    if (process.platform === "win32") expect(isInsideRelative("D:\\x")).toBe(false);
   });
 });

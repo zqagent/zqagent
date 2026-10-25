@@ -13,6 +13,7 @@ import {
   CODE_INSTRUCTIONS,
   COWORK_INSTRUCTIONS,
   LANGUAGE_GUIDANCE,
+  MCP_GUIDANCE,
   NARRATION_GUIDANCE,
   OCR_GUIDANCE,
   buildEnvBlock,
@@ -28,7 +29,7 @@ export interface AgentDef {
   prompt: string;
   /**
    * 可选：切换到此 agent 时同步切换的模型标识
-   * （如 "gpt-4o" / "deepseek-flash"）。未设置则沿用当前模型。
+   * （如 "your-model"）。未设置则沿用当前模型。
    */
   model?: string;
 }
@@ -142,7 +143,7 @@ export class AgentRegistry {
 
   /**
    * 为指定 agent 组装完整系统提示词：
-   * agent prompt + 叙述规则 + OCR/语言引导 + 环境信息块。
+   * agent prompt + 叙述规则 + MCP/OCR/语言引导 + 环境信息块。
    *
    * @param name      agent 名称（不存在时回退到当前 agent）
    * @param workspace 工作区路径（注入环境信息块）
@@ -153,6 +154,7 @@ export class AgentRegistry {
     return [
       def.prompt,
       NARRATION_GUIDANCE,
+      MCP_GUIDANCE,
       OCR_GUIDANCE,
       LANGUAGE_GUIDANCE,
       buildEnvBlock(workspace, today),

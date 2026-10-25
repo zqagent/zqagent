@@ -35,7 +35,8 @@ zqagent server 监听 http://localhost:8787
 | `PORT` | 监听端口 | `8787` |
 | `DATA_DIR` | 状态/租户根目录 | `./.zqagent_data` |
 | `APPROVAL_TIMEOUT_SECONDS` | 审批/提问挂起超时，超时回收内存任务 | `900` |
-| `TENANT_ID` / `TENANT_API_KEY` / `MODEL` | 首次启动自动创建的演示租户 | `demo` / 随机生成 / `gpt-4o-mini` |
+| `SESSION_DELTA_FLUSH_MS` | 流式 delta 的合并窗口。模型逐 token 回包时，同一窗口内的增量合成一条事件再下发，避免浏览器每条都重渲染（`0` = 关闭合并，排查顺序问题时用） | `16` |
+| `TENANT_ID` / `TENANT_API_KEY` / `MODEL` | 首次启动自动创建的演示租户（不设 `MODEL` 则不指定模型，需在控制台里选） | `demo` / 随机生成 / — |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` | 演示租户的模型配置 | — |
 
 ## 2. 认证
@@ -288,7 +289,7 @@ export ADMIN=$(node -e "console.log(require('./.zqagent_data/admin.json').apiKey
 # 列出 / 新建 / 删除项目（= 租户）
 curl -s -H "Authorization: Bearer $ADMIN" $BASE/api/v1/projects
 curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
-  -d '{"name":"openworker","workspaceRoot":"/path/to/repo","model":"deepseek-v4-flash"}' \
+  -d '{"name":"openworker","workspaceRoot":"/path/to/repo","model":"deepseek-flash"}' \
   $BASE/api/v1/projects
 # => {"data":{"id":"...","name":"openworker","apiKey":"zk_...", ...}}   # apiKey 仅创建时回传一次
 curl -s -X DELETE -H "Authorization: Bearer $ADMIN" $BASE/api/v1/projects/<id>
@@ -330,7 +331,45 @@ curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/api/v1/sessions
 ```
 
+## 14. 节点自更新（self-update）
 
+远端（控制台 / 集群指令 `self_update`）可让节点自行下载新版本并重启，
+重启后由 systemd/launchd 拉起新进程，并凭本地 `fleet.json` 里的凭据**自动重连 Hub**，
+无需重新接入。仅当节点满足「SEA 单文件 + 服务托管 + 配置验签公钥」时才可用，
+其余形态（npm 安装 / 前台运行 / 缺公钥）会在 `status.reason` 里给出原因。
+
+```bash
+# ① 状态：当前版本、通道、待安装版本、可回滚版本、上次错误
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"action":"status"}' $BASE/api/v1/node/self-update
+# => {"data":{"enabled":true,"currentVersion":"0.2.15","channel":"stable",
+#             "serviceManager":"systemd","backupVersion":"0.2.14", ...}}
+
+# ② 检查（拉清单验签比对，不下载）
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"action":"check"}' $BASE/api/v1/node/self-update
+# => {"data":{"updateAvailable":true,"latestVersion":"0.2.16","currentVersion":"0.2.15"}}
+#    不可更新时 updateAvailable=false 且带 reason（已是最新 / 需手动升级到 >= x.y.z）
+
+# ③ 安装（默认等节点空闲后重启；force=true 立即重启，会中断运行中的任务）
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"action":"install"}' $BASE/api/v1/node/self-update
+# => {"data":{"accepted":true,"fromVersion":"0.2.15","toVersion":"0.2.16",
+#             "message":"开始安装 v0.2.16（等待节点空闲后重启）"}}
+```
+
+要点：
+
+- **回执成功 = 已受理，不等于已升级**。安装完成后进程会退出（`exit(70)`），
+  由服务管理器拉起新版本；期间连接断开、接口短暂不可用。升级结果用
+  `action=status`（或 `GET /api/v1/node/host` 的 `version`）复核。
+- 因此不要把安装和重启串在一条 shell 命令里（`update --now && systemctl restart`
+  会因非零退出被短路）；需要手工干预时用
+  `nohup sh -c 'zqagent update --now; systemctl restart zqagent' &`。
+- 集群指令等价物：`{"type":"self_update","payload":{"action":"install","force":false}}`，
+  ack 语义与 HTTP 一致。
+- 安装前会做「下载 → 哈希 → 验签 → 自检」，替换后再对目标路径自检一次，
+  失败立即用备份回滚并记入 `skippedVersion`，不会陷入重启循环。
 
 > 注：Server 自 2026-08-08 起已支持 CORS（`Access-Control-Allow-Origin: *`），
 > 浏览器跨域调试可直接使用；SSE 因浏览器 `EventSource` 无法携带

@@ -8,8 +8,13 @@ import { Reader, Writer, WireError } from "./varint.js";
 /** ASCII "ZQ"：用于在公网暴露面上廉价丢弃非法流量 */
 export const FRAME_MAGIC = [0x5a, 0x51] as const;
 export const PROTOCOL_VERSION = 1;
-/** 载荷上限：现状节点侧上报上限约 3.5 MB（FleetNodeBridge.ts:53,992-996） */
-export const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+/**
+ * 载荷上限：16MB。
+ *
+ * 需要容纳聊天附件（单次最多 10MB 原文件 → base64 约 13.4MB）。
+ * 节点上报的事件仍受各自更小的业务上限约束，这里只是帧级防线。
+ */
+export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
 /** 帧类型（低 4 位）。M1 已实现载荷的消息见 docs/wire-protocol.md §3 */
 export const FrameType = {

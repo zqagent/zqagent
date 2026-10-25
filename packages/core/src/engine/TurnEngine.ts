@@ -36,6 +36,16 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as _path from "path";
 import { GEN_SESSION_NAME_INSTRUCTIONS } from "../prompts/index.js";
+import type { MessageAttachment, StoredAttachment } from "./attachments.js";
+import { DEFAULT_MAX_ITERATIONS } from "./limits.js";
+
+/** 待注入的 steering 项（文本 + 可选的附件） */
+interface SteeringItem {
+  text: string;
+  attachments?: MessageAttachment[];
+  /** 附件落盘引用（与 attachments 一一对应；随事件带给控制台） */
+  attachmentRefs?: StoredAttachment[];
+}
 
 /** 生成短请求 ID（8 位 hex，用于关联 LLM 请求与审计日志/事件） */
 function genReqId(): string {
@@ -91,7 +101,7 @@ export interface TurnEngineOpts {
   instructions: string;
   /** 生成会话名称的提示词 */
   genSessionNamePrompt?: string;
-  /** 单轮最大迭代次数（默认 300） */
+  /** 单轮最大迭代次数（缺省用 DEFAULT_MAX_ITERATIONS） */
   maxIterations?: number;
   /**
    * 推理强度（可选）。透传给 Provider 的 LLM 请求参数
@@ -269,7 +279,7 @@ export class TurnEngine {
   // 使正在执行的可中断工具（run_shell）立即终止子进程，而不是等它自然结束
   private _toolAbort: AbortController | null = null;
   // Steering 消息队列：外部排队注入的用户级指令，迭代间隙注入
-  private _steering: string[] = [];
+  private _steering: SteeringItem[] = [];
 
   // 上下文压缩
   compactionState: CompactionState | null = null;
@@ -342,7 +352,7 @@ export class TurnEngine {
     this.instructions = opts.instructions; // 注入为首条 system 消息
     this.genSessionNamePrompt =
       opts.genSessionNamePrompt || GEN_SESSION_NAME_INSTRUCTIONS;
-    this.maxIterations = opts.maxIterations ?? 300;
+    this.maxIterations = opts.maxIterations ?? DEFAULT_MAX_ITERATIONS;
     this.messages = opts.messages ? [...opts.messages] : [];
     this._hook = opts.hook;
     this._contextWindow = opts.contextWindow;
@@ -395,8 +405,32 @@ export class TurnEngine {
   }
 
   /** 排队 steering 消息（下一迭代间隙注入为 user 消息） */
-  queueSteering(text: string) {
-    this._steering.push(text);
+  queueSteering(
+    text: string,
+    attachments?: MessageAttachment[],
+    attachmentRefs?: StoredAttachment[],
+  ) {
+    this._steering.push({
+      text,
+      ...(attachments?.length ? { attachments } : {}),
+      ...(attachmentRefs?.length ? { attachmentRefs } : {}),
+    });
+  }
+
+  /**
+   * 撤销一条尚未注入的 steering。
+   *
+   * 按文本删第一条匹配项：调用方（SessionManager）已按索引删掉了自己那份队列，
+   * 这里只需保证引擎不再注入同样的内容。用文本而非索引，是因为引擎会在迭代
+   * 间隙批量清空 `_steering`，索引可能已经漂移；文本相同则删哪条都等价。
+   *
+   * @returns 是否真的删掉了（已注入的项返回 false，调用方据此提示用户）
+   */
+  removeSteering(text: string): boolean {
+    const i = this._steering.findIndex((s) => s.text === text);
+    if (i < 0) return false;
+    this._steering.splice(i, 1);
+    return true;
   }
 
   // ===================== 主入口 =====================
@@ -407,18 +441,38 @@ export class TurnEngine {
    * 追加用户输入到历史，产出 TURN_START 事件，然后转发 _loop()
    * 的全部事件。收到中断后仍会消费完剩余事件（保证 TURN_END 产出）。
    */
-  async *run(userInput: string, taskId?: string): AsyncGenerator<WsEvent> {
+  async *run(
+    userInput: string,
+    taskId?: string,
+    attachments?: MessageAttachment[],
+    /** 附件落盘引用（由会话层先存盘再传入）：消息与事件只带它，不带 base64 */
+    attachmentRefs?: StoredAttachment[],
+  ): AsyncGenerator<WsEvent> {
+    /*
+     * 模型为空时不要发请求。
+     *
+     * 系统不再给「未配置模型」兜底一个假型号（早期是 gpt-4o，用户既没这个型号
+     * 的 Key、也没选过它，第一轮必然失败且报错难懂）。这里提前给出可执行的提示。
+     */
+    if (!this.model.trim()) {
+      throw new Error(
+        "未指定模型：请先选择模型（CLI 运行 /connect；控制台在「设置 → AI 模型」中添加供应商并选择模型）",
+      );
+    }
     this.taskId = taskId;
+    // 本轮起点先定：outbound 用它判定哪些附件属于本轮（见 _finalizeOutbound）
+    this._turnStartTime = Date.now();
     this.messages.push({
       role: "user",
       content: userInput,
-      ts: Date.now(),
+      ...(attachments?.length ? { attachments } : {}),
+      ...(attachmentRefs?.length ? { attachmentRefs } : {}),
+      ts: this._turnStartTime,
       taskId,
     });
 
     this._cancel = false;
     this._producedFiles = [];
-    this._turnStartTime = Date.now();
     // 新 turn 重新给压缩一次机会（上一 turn 可能因无进展而处于冷却）
     this._compactStalledAt = -1;
 
@@ -426,7 +480,14 @@ export class TurnEngine {
 
     yield {
       type: EventType.TURN_START,
-      data: { taskId: this.taskId, input: userInput },
+      data: {
+        taskId: this.taskId,
+        input: userInput,
+        // 只报个数：附件字节不进事件流（事件会落盘，base64 会把日志撑爆）
+        ...(attachments?.length ? { attachmentCount: attachments.length } : {}),
+        // 落盘引用足够小，随事件带给控制台渲染缩略图 / 详情回看
+        ...(attachmentRefs?.length ? { attachments: attachmentRefs } : {}),
+      },
     };
 
     for await (const event of this._loop()) {
@@ -968,16 +1029,22 @@ export class TurnEngine {
       if (!turn.toolCalls.length) {
         // 有排队的 steering 时先注入，继续下一轮迭代
         if (this._steering.length > 0) {
-          for (const text of this._steering) {
+          for (const s of this._steering) {
             this.messages.push({
               role: "user",
-              content: text,
+              content: s.text,
+              ...(s.attachments?.length ? { attachments: s.attachments } : {}),
+              ...(s.attachmentRefs?.length ? { attachmentRefs: s.attachmentRefs } : {}),
               ts: Date.now(),
               taskId: this.taskId,
             });
             yield {
               type: EventType.QUEUE_STEERING,
-              data: { text, taskId: this.taskId },
+              data: {
+                text: s.text,
+                taskId: this.taskId,
+                ...(s.attachmentRefs?.length ? { attachments: s.attachmentRefs } : {}),
+              },
             };
           }
           this._steering = [];
@@ -1033,16 +1100,22 @@ export class TurnEngine {
 
       // 注入 steering
       if (this._steering.length > 0) {
-        for (const text of this._steering) {
+        for (const s of this._steering) {
           this.messages.push({
             role: "user",
-            content: text,
+            content: s.text,
+            ...(s.attachments?.length ? { attachments: s.attachments } : {}),
+            ...(s.attachmentRefs?.length ? { attachmentRefs: s.attachmentRefs } : {}),
             ts: Date.now(),
             taskId: this.taskId,
           });
           yield {
             type: EventType.QUEUE_STEERING,
-            data: { text, taskId: this.taskId },
+            data: {
+              text: s.text,
+              taskId: this.taskId,
+              ...(s.attachmentRefs?.length ? { attachments: s.attachmentRefs } : {}),
+            },
           };
         }
         this._steering = [];
@@ -1435,7 +1508,7 @@ export class TurnEngine {
   /** 过滤 notice + 剥离 display-only 字段，得到最终发送视图 */
   private _finalizeOutbound(sourceMessages: Message[]): Message[] {
     // display-only sidecar 字段 (发送给模型前剥离)
-    const _STRIP = new Set(["source", "_display", "ts", "reasoning", "usage"]);
+    const _STRIP = new Set(["source", "_display", "ts", "reasoning", "usage", "attachmentRefs"]);
 
     return sourceMessages
       .filter((m) => m.role !== "notice")
@@ -1448,9 +1521,14 @@ export class TurnEngine {
             content: m.content,
           };
         }
+        // 附件只随产生它的那一轮发送：历史轮次的附件（ts 早于本轮开始）一律剥离。
+        // 否则每轮都会把同一张图重新计费，且与「附件不落盘」的语义不一致。
+        const staleAttachments =
+          Boolean(m.attachments?.length) && (m.ts ?? 0) < this._turnStartTime;
         // assistant/user/system 消息：只剥离 sidecar 字段，保留 tool_calls
         const stripped: Record<string, unknown> = {};
         for (const [k, v] of Object.entries(m)) {
+          if (staleAttachments && k === "attachments") continue;
           if (!_STRIP.has(k)) {
             stripped[k] = v;
           }

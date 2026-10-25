@@ -10,7 +10,7 @@
 # 可选环境变量（未设置时从项目 .env 读取）：
 #   PORT                  监听端口（默认 8787；被占用时换一个，如 PORT=8790）
 #   TENANT_API_KEY        演示租户 API Key（默认由脚本随机生成后注入）
-#   MODEL                 LLM 模型（默认取 OPENAI_MODEL，再回退 gpt-4o-mini）
+#   MODEL                 LLM 模型（默认取 OPENAI_MODEL；都没有则不指定）
 #   OPENAI_API_KEY        模型 API Key（设置后进入完整链路模式）
 #   OPENAI_BASE_URL       模型端点（可选，默认官方）
 #
@@ -51,7 +51,9 @@ PORT="${PORT:-8790}"
 BASE_URL="http://127.0.0.1:${PORT}"
 # 服务端默认已改为首启随机生成密钥；脚本需要知道密钥才能发请求，故这里显式注入一个临时值
 API_KEY="${TENANT_API_KEY:-zk_test_$(node -e 'process.stdout.write(require("crypto").randomBytes(20).toString("hex"))')}"
-MODEL="${MODEL:-${OPENAI_MODEL:-gpt-4o-mini}}"
+# 不再回退某个具体型号：烟雾测试（无 Key）用不到模型；完整链路必须由调用方
+# 明确指定，否则会拿一个本地根本没有的型号去请求，报错原因反而更难看清。
+MODEL="${MODEL:-${OPENAI_MODEL:-}}"
 APPROVAL_TIMEOUT_SECONDS=8
 DATA_DIR="$(mktemp -d /tmp/zqagent-srv-test.XXXXXX)"
 SERVER_PID=""

@@ -5,6 +5,8 @@
  * 测试环境为管道（非 TTY），因此显式传入 level/unicode 控制行为。
  */
 import { describe, it, expect } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
   BRAND_TEXT,
   renderBanner,
@@ -42,6 +44,31 @@ describe("renderBrandArt", () => {
     const lines = renderBrandArt("E").split("\n");
     expect(lines[2]).toBe(lines[0]);
     expect(lines[4]).toBe(lines[0]);
+  });
+});
+
+/**
+ * install.sh 里的字标是手工维护的 shell heredoc，没法直接 import banner.ts，
+ * 只能靠人肉同步。这里锁住一致性：改了 GLYPH_COLS 却忘记同步安装脚本时立刻失败。
+ */
+describe("install.sh 的字标与 CLI 横幅一致", () => {
+  // __dirname = packages/core/test → 上溯三层到仓库根
+  const ROOT = path.resolve(__dirname, "../../..");
+  const script = fs.readFileSync(
+    path.join(ROOT, "packages/site/docs/public/install.sh"),
+    "utf8",
+  );
+
+  it("heredoc 内容逐行等于 renderBrandArt 的输出", () => {
+    const match = /cat <<'LOGO'\n([\s\S]*?)\nLOGO/.exec(script);
+    expect(match, "install.sh 中应存在 print_logo 的 heredoc").not.toBeNull();
+    expect(match![1]).toBe(renderBrandArt(BRAND_TEXT));
+  });
+
+  it("宽度同样适配 80 列终端", () => {
+    const art = /cat <<'LOGO'\n([\s\S]*?)\nLOGO/.exec(script)![1]!;
+    const width = Math.max(...art.split("\n").map((l) => l.length));
+    expect(width).toBeLessThanOrEqual(79);
   });
 });
 

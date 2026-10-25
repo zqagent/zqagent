@@ -10,6 +10,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { ToolRegistry, RiskClass, type ToolMetadata } from "./ToolRegistry.js";
 import { resolveWithinRoot } from "./pathSafety.js";
+import type { ConflictGuard } from "./conflictGuard.js";
 
 /** read_file 默认最大读取行数 */
 const DEFAULT_MAX_LINES = 2000;
@@ -22,7 +23,7 @@ const MAX_LINE_CHARS = 500;
  * 返回带行号的内容，格式 '  12\ttext'，便于引用为 path:line；
  * 大文件通过 start_line / max_lines 窗口化阅读。
  */
-function makeReadFile(workspace: string) {
+function makeReadFile(workspace: string, guard?: ConflictGuard) {
   const root = path.resolve(workspace);
 
   return function read_file(args: Record<string, unknown>) {
@@ -46,6 +47,9 @@ function makeReadFile(workspace: string) {
     let total = 0;
     try {
       const content = fs.readFileSync(target, "utf-8");
+      // 记录本会话读到的版本：后续写入若发现磁盘内容已变（别的会话改过），
+      // 会被 ConflictGuard 拦下，而不是静默覆盖
+      guard?.noteRead(target, content);
       const lines = content.split("\n");
       total = lines.length;
       for (let i = startLine - 1; i < Math.min(startLine - 1 + maxLines, lines.length); i++) {
@@ -80,7 +84,7 @@ function makeReadFile(workspace: string) {
  *
  * 自动创建父目录；overwrite=false 时拒绝覆盖已存在文件。
  */
-function makeWriteFile(workspace: string) {
+function makeWriteFile(workspace: string, guard?: ConflictGuard) {
   const root = path.resolve(workspace);
 
   return function write_file(args: Record<string, unknown>) {
@@ -100,10 +104,14 @@ function makeWriteFile(workspace: string) {
     if (fs.existsSync(target) && !overwrite) {
       return { error: "文件已存在 (overwrite=false)" };
     }
+    // 只有本会话读过该文件时才校验：读过之后又被别的会话改动 → 拒绝覆盖
+    const conflict = guard?.checkWrite(target, filePath);
+    if (conflict) return { error: conflict.message };
 
     try {
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, content, "utf-8");
+      guard?.noteWrite(target, content);
     } catch (exc) {
       return { error: `写入失败: ${String(exc)}` };
     }
@@ -149,7 +157,7 @@ function makeListFiles(workspace: string) {
 }
 
 /** replace_in_file — 精确文本替换 (对齐 Python 版 aisuite) */
-function makeReplaceInFile(workspace: string) {
+function makeReplaceInFile(workspace: string, guard?: ConflictGuard) {
   const root = path.resolve(workspace);
 
   return function replace_in_file(args: Record<string, unknown>) {
@@ -166,6 +174,9 @@ function makeReplaceInFile(workspace: string) {
     if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
       return { error: `不是文件: ${filePath}` };
     }
+    // 先看本会话读到的版本是否已过期（被别的会话改过）
+    const conflict = guard?.checkWrite(target, filePath);
+    if (conflict) return { error: conflict.message };
 
     try {
       const content = fs.readFileSync(target, "utf-8");
@@ -177,6 +188,7 @@ function makeReplaceInFile(workspace: string) {
 
       const updated = content.replaceAll(oldStr, newStr);
       fs.writeFileSync(target, updated, "utf-8");
+      guard?.noteWrite(target, updated);
       return {
         path: path.relative(resolved.root, target),
         replacements: count,
@@ -194,8 +206,12 @@ function makeReplaceInFile(workspace: string) {
  *
  * 供 explore 子代理等「只读」场景使用，使声明的 schema 与实际能力一致。
  */
-export function registerReadOnlyFileTools(registry: ToolRegistry, workspace: string): void {
-  const readFile = makeReadFile(workspace);
+export function registerReadOnlyFileTools(
+  registry: ToolRegistry,
+  workspace: string,
+  guard?: ConflictGuard,
+): void {
+  const readFile = makeReadFile(workspace, guard);
   registry.register(
     (args) => readFile(args),
     { category: "filesystem", riskLevel: "low", capabilities: ["read_file"], requiresApproval: false },
@@ -244,10 +260,14 @@ export function registerReadOnlyFileTools(registry: ToolRegistry, workspace: str
  * read_file / list_files 为低风险（无需审批）；write_file / replace_in_file
  * 为中风险且 requiresApproval=true（由权限引擎决定是否需要审批）。
  */
-export function registerFileTools(registry: ToolRegistry, workspace: string): void {
-  registerReadOnlyFileTools(registry, workspace);
+export function registerFileTools(
+  registry: ToolRegistry,
+  workspace: string,
+  guard?: ConflictGuard,
+): void {
+  registerReadOnlyFileTools(registry, workspace, guard);
 
-  const writeFile = makeWriteFile(workspace);
+  const writeFile = makeWriteFile(workspace, guard);
   registry.register(
     (args) => writeFile(args),
     { category: "filesystem", riskLevel: "medium", capabilities: ["write_file"], requiresApproval: true },
@@ -269,7 +289,7 @@ export function registerFileTools(registry: ToolRegistry, workspace: string): vo
     },
   );
 
-  const replaceFile = makeReplaceInFile(workspace);
+  const replaceFile = makeReplaceInFile(workspace, guard);
   registry.register(
     (args) => replaceFile(args),
     { category: "filesystem", riskLevel: "medium", capabilities: ["edit_file"], requiresApproval: true },

@@ -13,12 +13,18 @@ import {
   type ModelMeta,
 } from "../providers/models.js";
 import { ApiError } from "./session.js";
+import {
+  BUILTIN_PROVIDER_ID,
+  FALLBACK_MODEL,
+  GLOBAL_PROVIDER_ID,
+  isBuiltinProvider,
+} from "./llmIds.js";
 
 // 供视图/持久化层沿用同一入口（实现已下移到 providers/models.ts，便于 llmConfig / CLI 复用）
 export { modelContextWindow, normalizeModelMeta };
 
-/** 环境变量配置的「节点全局 LLM」在列表中的固定 id（不可删除） */
-export const GLOBAL_PROVIDER_ID = "__env__";
+// 固定 id 常量集中放在 llmIds.ts（store 也要用，避免循环依赖），此处再导出
+export { BUILTIN_PROVIDER_ID, GLOBAL_PROVIDER_ID, isBuiltinProvider } from "./llmIds.js";
 
 /** 环境变量提供的全局 LLM（OPENAI_*），有则展示但不可删除 */
 export function envProvider() {
@@ -75,19 +81,26 @@ export function nodeLlmView(cfg: NodeLlmConfig) {
           },
         ]
       : []),
-    ...cfg.providers.map((p) => ({
-      id: p.id,
-      name: p.name,
-      type: p.type ?? "",
-      baseURL: p.baseURL,
-      model: p.model,
-      hasApiKey: Boolean(p.apiKey),
-      models: p.models ?? [],
-      nonChat: p.nonChat ?? [],
-      modelMeta: p.modelMeta ?? [],
-      reasoningEffort: p.reasoningEffort ?? null,
-      global: false as const,
-    })),
+    ...cfg.providers.map((p) => {
+      const builtin = isBuiltinProvider(p.id);
+      return {
+        id: p.id,
+        name: p.name,
+        type: p.type ?? "",
+        baseURL: p.baseURL,
+        model: p.model,
+        hasApiKey: Boolean(p.apiKey),
+        models: p.models ?? [],
+        nonChat: p.nonChat ?? [],
+        modelMeta: p.modelMeta ?? [],
+        reasoningEffort: p.reasoningEffort ?? null,
+        global: false as const,
+        /** 平台内置（接入 Hub 后自动下发，用户不用关心 Key） */
+        builtin,
+        /** 不可编辑的字段：控制台据此把 baseURL / key 显示为只读 */
+        ...(builtin ? { locked: ["baseURL", "apiKey"] as string[] } : {}),
+      };
+    }),
   ];
   return {
     defaultProviderId: cfg.defaultProviderId ?? null,
@@ -105,10 +118,51 @@ export function applyNodeLlmPatch(
   const next: NodeLlmConfig = { providers: cfg.providers, defaultProviderId: cfg.defaultProviderId };
   if (Array.isArray(raw?.providers)) {
     const old = new Map(cfg.providers.map((p) => [p.id, p]));
-    next.providers = raw.providers
+    const incoming = raw.providers
       .filter((x): x is Record<string, unknown> => Boolean(x) && typeof x === "object")
-      .filter((x) => x.global !== true && String(x.id ?? "") !== GLOBAL_PROVIDER_ID)
-      .map((x) => {
+      .filter((x) => x.global !== true && String(x.id ?? "") !== GLOBAL_PROVIDER_ID);
+
+    /*
+     * 内置项：不可删除、不可改 baseURL/apiKey，但允许换型号。
+     *
+     * 无论提交里有没有它，都以**旧值**为准放回首位——用户误删、老版本前端
+     * 不认识这个 id、或有人手工构造请求想换掉凭据，都不会生效。
+     * 只从提交里取 model / models / reasoningEffort / name 四个字段。
+     */
+    const prevBuiltin = cfg.providers.find((p) => isBuiltinProvider(p.id));
+    const builtinPatch = incoming.find((x) => isBuiltinProvider(String(x.id ?? "")));
+    const keptBuiltin: LlmProviderEntry[] = prevBuiltin
+      ? [
+          {
+            ...prevBuiltin,
+            ...(builtinPatch?.model != null
+              ? { model: String(builtinPatch.model).trim() || prevBuiltin.model }
+              : {}),
+            ...(normalizeModelList(builtinPatch?.models)
+              ? { models: normalizeModelList(builtinPatch?.models) }
+              : {}),
+            // 用户可为内置模型勾选输入能力（如 deepseek-flash 的图片输入）
+            ...(builtinPatch?.modelMeta !== undefined
+              ? {
+                  modelMeta:
+                    normalizeModelMeta(builtinPatch.modelMeta) ?? prevBuiltin.modelMeta,
+                }
+              : {}),
+            ...(builtinPatch?.reasoningEffort !== undefined
+              ? { reasoningEffort: normReasoningEffort(builtinPatch.reasoningEffort) }
+              : {}),
+            ...(typeof builtinPatch?.name === "string" && builtinPatch.name.trim()
+              ? { name: builtinPatch.name.trim() }
+              : {}),
+          },
+        ]
+      : [];
+
+    next.providers = [
+      ...keptBuiltin,
+      ...incoming
+        .filter((x) => !isBuiltinProvider(String(x.id ?? "")))
+        .map((x) => {
         const id = String(x.id ?? "").trim();
         if (!id) throw new ApiError(400, "bad_request", "供应商 id 不能为空");
         const prev = old.get(id);
@@ -131,7 +185,8 @@ export function applyNodeLlmPatch(
           ...(nonChat ? { nonChat } : {}),
           ...(modelMeta ? { modelMeta } : {}),
         };
-      });
+        }),
+    ];
   }
   if (typeof raw?.defaultProviderId === "string") {
     const id = raw.defaultProviderId.trim();
@@ -158,6 +213,28 @@ export function nodeDefaultProvider(store: Store): LlmProviderEntry | null {
   if (cfg.providers.length === 0) return null;
   return (
     cfg.providers.find((p) => p.id === cfg.defaultProviderId) ?? cfg.providers[0] ?? null
+  );
+}
+
+/** 兜底型号（定义与说明见 llmIds.ts） */
+export { FALLBACK_MODEL } from "./llmIds.js";
+
+/**
+ * 演示租户 / 新项目的默认模型。
+ *
+ * 优先级：显式环境变量 → 节点默认 LLM（内置或用户配置） → 空串。
+ * 部署脚本（configure-server.sh）写的 `OPENAI_MODEL` 优先，保证自建用户
+ * 的模型选择不被覆盖。
+ *
+ * 三者都没有时返回空串而不是某个厂商型号：控制台据此显示「未选择模型」，
+ * 不假装系统已经替用户选好了一个（见 llmIds 的 FALLBACK_MODEL）。
+ */
+export function defaultTenantModel(store: Store): string {
+  return (
+    process.env.OPENAI_MODEL ||
+    process.env.MODEL ||
+    nodeDefaultProvider(store)?.model ||
+    FALLBACK_MODEL
   );
 }
 

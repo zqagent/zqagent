@@ -131,25 +131,32 @@ export function buildEnvBlock(workspace: string, today: string): string {
   ].join("\n");
 }
 
-/**
- * 组装完整的系统提示词
- *
- * @param agentType 代理类型（code=编程助手 / cowork=通用协作）
- * @param workspace 工作区路径（注入到环境信息块中）
- * @param today     当前日期（ISO 格式，注入到环境信息块中）
- * @returns 拼接后的完整系统提示词（代理提示词 + 叙述规则 + 环境信息）
- */
-/** OCR 工具引导：优先使用 MCP 注入的 OCR 能力（mcp__ocr__recognize） */
+/** MCP 工具引导：说明工具来源、按需检索与失败处理 */
+export const MCP_GUIDANCE = `MCP 工具（外部能力）：
+- 工具名以 mcp__<server>__<tool> 形式出现时，来自已连接的 MCP 服务器；按任务需要主动使用，不要假设某个服务器一定存在。
+- 若工具表里没有所需能力但存在 mcp_search_tools，先用它按关键词检索（如 ocr、github、database）；命中的工具会在下一轮出现在工具表中，也可直接用 mcp_call_tool 调用。
+- MCP 工具通常有副作用并需要审批；调用失败时读取返回的错误与 how_to_fix，不要自行安装系统依赖。`;
+
+/** OCR 工具引导：优先使用内置 OCR MCP（mcp__ocr__recognize） */
 export const OCR_GUIDANCE = `票据/扫描件/图片文字提取：
-- 需要从图片、扫描件或 PDF（尤其是无文本层的扫描 PDF）提取文字时，优先使用已注入的 OCR 工具（工具名形如 mcp__ocr__recognize）。
-- 该工具支持 imagePath（沙箱内文件路径，推荐）、imageBase64、imageUrl；传入 .pdf 会自动用 pdftoppm 转图片并逐页识别（maxPages/dpi 可调）。
-- 不要为此自行安装 tesseract、调用外部 OCR 命令或依赖文本层提取；仅当 OCR 工具不在工具列表中时，才考虑其他方式并向用户说明。`;
+- 需要从图片、扫描件或 PDF（尤其是无文本层的扫描 PDF）提取文字时，优先使用内置 OCR 工具 mcp__ocr__recognize（macOS Vision / tesseract / 多模态模型自动降级，无需额外安装）。
+- 该工具支持 imagePath（工作区内文件路径，推荐）、imageBase64、imageUrl；传入 .pdf 会逐页识别（maxPages/dpi 可调）。
+- 若工具列表中没有该工具，说明 OCR 服务器被禁用，可提示用户执行 /mcp enable ocr。
+- 若调用返回 error / how_to_fix，按其中的指引告知用户；不要自行安装 tesseract 或调用外部 OCR 命令。`;
 
 /** 语言引导：默认使用简体中文 */
 export const LANGUAGE_GUIDANCE = `语言：
 - 始终使用简体中文与用户交流（包括进度叙述与最终回答）。代码、命令、路径、标识符、报错原文保持原样。
 - 思考（reasoning）也尽量使用中文，避免中英混杂。`;
 
+/**
+ * 组装完整的系统提示词
+ *
+ * @param agentType 代理类型（code=编程助手 / cowork=通用协作）
+ * @param workspace 工作区路径（注入到环境信息块中）
+ * @param today     当前日期（ISO 格式，注入到环境信息块中）
+ * @returns 拼接后的完整系统提示词（代理提示词 + 叙述规则 + MCP/OCR 引导 + 环境信息）
+ */
 export function buildInstructions(
   agentType: "code" | "cowork",
   workspace: string,
@@ -161,6 +168,7 @@ export function buildInstructions(
   return [
     agentPrompt,
     NARRATION_GUIDANCE,
+    MCP_GUIDANCE,
     OCR_GUIDANCE,
     LANGUAGE_GUIDANCE,
     buildEnvBlock(workspace, today),

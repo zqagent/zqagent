@@ -7,6 +7,7 @@ export default defineConfig({
     secrets: "src/secrets.ts",
     "approval-view": "src/approval-view.ts",
     "llm-presets": "src/llm-presets.ts",
+    "model-capabilities": "src/model-capabilities.ts",
     "hub-api": "src/hub-api.ts",
     "notify/index": "src/notify/index.ts",
     "wire/index": "src/wire/index.ts",

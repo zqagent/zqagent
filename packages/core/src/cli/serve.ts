@@ -7,15 +7,22 @@
  * 用法：
  *   zqagent serve [--data-dir <dir>] [--host <addr>] [--port <n>]
  *                 [--hub <url> --enroll-code <code> [--label <name>]]
+ *                 [--hub <url> --username <邮箱/手机号> --password <密码> [--label <name>]]
  *
- * 首次带注册码即接入；已有 `{DATA_DIR}/fleet.json` 时无需再带（fleet.json 优先）。
- * 两者都没有时，交互式终端会提示用 Hub 账号（密码或短信验证码）直接接入。
+ * 首次带注册码或账号即接入；已有 `{DATA_DIR}/fleet.json` 时无需再带（fleet.json 优先）。
+ * 都没有时，交互式终端会提示用 Hub 账号（密码或短信验证码）直接接入。
  */
 import { startServer } from "../server/runtime.js";
-import { cliLog } from "../terminal.js";
-import { maybeAccountEnroll } from "./account-enroll.js";
+import { cliErr, cliLog } from "../terminal.js";
+import { maybeAccountEnroll, resolveDefaultHub } from "./account-enroll.js";
+import {
+  buildAccountAuth,
+  isCompleteAccount,
+  linkNode,
+  type AccountFlags,
+} from "./link.js";
 
-interface ServeArgs {
+interface ServeArgs extends AccountFlags {
   hubUrl?: string;
   code?: string;
   label?: string;
@@ -31,6 +38,11 @@ function parse(argv: string[]): ServeArgs {
     const v = argv[i + 1];
     if (a === "--hub") { out.hubUrl = v; i++; }
     else if (a === "--enroll-code" || a === "--code") { out.code = v; i++; }
+    else if (a === "--username" || a === "--user") { out.username = v; i++; }
+    else if (a === "--email") { out.email = v; i++; }
+    else if (a === "--phone") { out.phone = v; i++; }
+    else if (a === "--password") { out.password = v; i++; }
+    else if (a === "--sms-code") { out.smsCode = v; i++; }
     else if (a === "--label") { out.label = v; i++; }
     else if (a === "--data-dir") { out.dataDir = v; i++; }
     else if (a === "--host") { out.host = v; i++; }
@@ -44,9 +56,41 @@ export async function runServeCommand(argv: string[]): Promise<void> {
   const args = parse(argv);
   const hubUrl = (args.hubUrl ?? process.env.HUB_URL ?? "").trim();
   const code = (args.code ?? process.env.HUB_ENROLL_CODE ?? "").trim();
+  const account = buildAccountAuth(args);
+
+  if (code && account) {
+    cliErr("--enroll-code 与 Hub 账号参数（--username/--password 等）只能二选一。");
+    return;
+  }
+  if (account && !isCompleteAccount(account) && !process.stdin.isTTY) {
+    cliErr("账号参数缺少密码或短信验证码：非交互环境请补 --password 或 --sms-code。");
+  }
+
+  // 非交互场景（systemd / 容器）也能用账号参数接入：先落盘，startServer 随即读取。
+  // 账号不完整（例如只给了 --username）时回退到交互向导补问密码。
+  if (!code && isCompleteAccount(account)) {
+    try {
+      const r = await linkNode({
+        hubUrl: resolveDefaultHub(args.hubUrl || undefined),
+        account: account!,
+        dataDir: args.dataDir,
+        label: args.label,
+        host: args.host,
+        port: args.port,
+      });
+      cliLog(
+        r.mode === "hot"
+          ? `✅ 已通过 Hub 账号接入（节点 ${r.nodeId}）`
+          : `✅ 已保存 Hub 接入凭据（节点 ${r.nodeId}）`,
+      );
+    } catch (e) {
+      // 接入失败不阻断本地启动；用户可稍后执行 zqagent link 重试
+      cliErr(`Hub 账号接入失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 
   // 未带注册码的首次启动：交互式提示用 Hub 账号接入（已接入/非 TTY 时自动跳过）
-  if (!(hubUrl && code)) {
+  if (!(hubUrl && code) && !isCompleteAccount(account)) {
     await maybeAccountEnroll({ dataDir: args.dataDir, hubUrl: args.hubUrl, label: args.label });
   }
 

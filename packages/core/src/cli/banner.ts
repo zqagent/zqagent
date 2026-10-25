@@ -35,8 +35,15 @@ const GLYPHS: Record<string, string[]> = {
 
 /** 字标行数（所有字形等高） */
 const GLYPH_ROWS = 6;
-/** 字形槽宽：8 列字形 + 1 列字间距，用于逐字拼装 */
-const GLYPH_COLS = 9;
+/**
+ * 字形槽宽：8 列字形 + 3 列字间距，用于逐字拼装。
+ *
+ * 间距取 3 列是为了让块状字母之间充分分开——1~2 列时间距与字形内部的
+ * 笔画空隙接近，远看仍像连成一整块色带。
+ * 7 个字母总宽 74 列，这是 80 列终端能容纳的上限：再加 1 列就是 80 列，
+ * 终端稍有内边距就会折行（banner.test.ts 有 ≤79 的断言）。
+ */
+const GLYPH_COLS = 11;
 
 /** 对角渐变停靠色（青 → 靛 → 品红），t∈[0,1] 线性插值 */
 const GRADIENT: ReadonlyArray<readonly [number, number, number]> = [

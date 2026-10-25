@@ -72,6 +72,7 @@ export interface FleetInfoBlob {
     name?: string | null;
     status?: string;
     lastUserMessage?: string | null;
+    lastStartedAt?: string | null;
     lastCompletedAt?: string | null;
   }>;
   ts?: string;
@@ -184,6 +185,45 @@ export function toWireAck(ack: FleetAckPayload): Ack {
     ok: ack.ok,
     error: ack.error,
     data: ack.data === undefined ? undefined : utf8Encode(JSON.stringify(ack.data)),
+  };
+}
+
+/**
+ * 回执 JSON 的单帧安全上限。
+ *
+ * 帧上限（16MB）是为聊天附件预留的；回执不需要那么大，这里仍按 4MB 控制，
+ * 避免一次 `get_events` / `read_file` 的大结果把终端内存顶上去。
+ * 留 64KB 余量：payload 外面还有帧头与 protobuf 的 tag/length 开销，
+ * 真正的意义是让「刚好卡在边界」的结果不至于因为包装而越界。
+ */
+export const ACK_JSON_MAX_BYTES = 4 * 1024 * 1024 - 64 * 1024;
+
+function mb(bytes: number): string {
+  return (bytes / (1024 * 1024)).toFixed(1);
+}
+
+/**
+ * 把回执收进单帧：过大时降级为一条**明确的错误回执**。
+ *
+ * 为什么需要：`encodeFrame` 对超限载荷是**抛错**，而这条路径上的异常会被写链的
+ * `.catch()` 吞掉 —— 控制台侧表现为「指令没有回执」，只能干等到 15s 超时，
+ * 用户看到的是「操作超时」，无从知道真实原因是结果太大。降级成错误回执后，
+ * 失败原因能直接显示在界面上。
+ *
+ * 只检查 `ok && 有 data` 的回执：失败回执本身很小，没必要每条都量一遍字节数。
+ *
+ * `json` 由调用方传入（它已经为日志序列化过一次），避免大对象重复 stringify。
+ */
+export function guardAckSize(ack: FleetAckPayload, json: string): FleetAckPayload {
+  if (!ack.ok || ack.data === undefined) return ack;
+  const bytes = Buffer.byteLength(json, "utf8");
+  if (bytes <= ACK_JSON_MAX_BYTES) return ack;
+  return {
+    reqId: ack.reqId,
+    type: ack.type,
+    ok: false,
+    // 带上实际大小：用户据此能判断「差一点」还是「差很多」，而不是只看到「失败」
+    error: `结果过大（${mb(bytes)} MB），超过单帧传输上限（${mb(ACK_JSON_MAX_BYTES)} MB），请缩小范围后重试`,
   };
 }
 

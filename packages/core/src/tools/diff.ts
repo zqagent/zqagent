@@ -8,9 +8,10 @@ import { ToolRegistry } from "./ToolRegistry.js";
 import * as fs from "fs";
 import * as path from "path";
 import { resolveEntryWithinRoot, resolveWithinRoot } from "./pathSafety.js";
+import type { ConflictGuard } from "./conflictGuard.js";
 
 /** apply_patch — Codex 风格补丁 (对齐 Python 版) */
-function makeApplyPatch(workspace: string) {
+function makeApplyPatch(workspace: string, guard?: ConflictGuard) {
   const root = path.resolve(workspace);
 
   return function apply_patch(args: Record<string, unknown>) {
@@ -81,6 +82,9 @@ function makeApplyPatch(workspace: string) {
         if (!fs.existsSync(target)) {
           return { error: `文件不存在: ${filePath}` };
         }
+        // 删除同样是破坏性操作：本会话读过之后被别人改过 → 先让人确认
+        const delConflict = guard?.checkWrite(target, filePath);
+        if (delConflict) return { error: delConflict.message };
         fs.unlinkSync(target);
         deletedFiles.push(path.relative(entry.root, target));
         fileCount++;
@@ -126,6 +130,9 @@ function makeApplyPatch(workspace: string) {
           return { error: `文件不存在: ${filePath}` };
         }
         const oldLines = fs.readFileSync(target, "utf-8").split("\n");
+        // 补丁是「基于读到的版本」生成的：先确认这个版本没被别人改过
+        const conflict = guard?.checkWrite(target, filePath);
+        if (conflict) return { error: conflict.message };
         // Apply hunks
         const newLines = applyPatchHunks(oldLines, chunkLines, filePath);
 
@@ -143,6 +150,7 @@ function makeApplyPatch(workspace: string) {
         }
         fs.mkdirSync(path.dirname(finalTarget), { recursive: true });
         fs.writeFileSync(finalTarget, newLines.join("\n"), "utf-8");
+        guard?.noteWrite(finalTarget, newLines.join("\n"));
         if (moveTo && finalTarget !== target) {
           // 删除源条目本身：父目录取 realpath，最后一段不解析（符号链接删链接）
           const entry = resolveEntryWithinRoot(root, filePath);
@@ -208,7 +216,7 @@ function findBlockMatch(lines: string[], block: string[], start: number): number
 // ==================== Unified Diff ====================
 
 /** apply_unified_diff — 标准 unified diff (对齐 Python 版) */
-function makeApplyUnifiedDiff(workspace: string) {
+function makeApplyUnifiedDiff(workspace: string, guard?: ConflictGuard) {
   const root = path.resolve(workspace);
 
   return function apply_unified_diff(args: Record<string, unknown>) {
@@ -234,6 +242,11 @@ function makeApplyUnifiedDiff(workspace: string) {
       const target = resolved.real;
 
       const oldLines = oldIsDevNull ? [] : (fs.existsSync(target) ? fs.readFileSync(target, "utf-8").split("\n") : []);
+      // diff 基于某个版本生成：不校验就应用会把别人的改动覆盖掉
+      if (!oldIsDevNull) {
+        const conflict = guard?.checkWrite(target, targetPath);
+        if (conflict) return { error: conflict.message };
+      }
       const newLines = applyDiffHunks(oldLines, patch.hunks, targetPath);
       hunkCount += patch.hunks.length;
 
@@ -254,7 +267,9 @@ function makeApplyUnifiedDiff(workspace: string) {
       }
 
       fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.writeFileSync(target, newLines.join("\n"), "utf-8");
+      const written = newLines.join("\n");
+      fs.writeFileSync(target, written, "utf-8");
+      guard?.noteWrite(target, written);
       const rel = path.relative(resolved.root, target);
       changedFiles.push(rel);
       if (oldIsDevNull) addedFiles.push(rel);
@@ -389,8 +404,12 @@ function applyDiffHunks(oldLines: string[], hunks: DiffHunk[], filePath: string)
 }
 
 /** 注册 diff 工具 */
-export function registerDiffTools(registry: ToolRegistry, workspace: string): void {
-  const applyPatchFunc = makeApplyPatch(workspace);
+export function registerDiffTools(
+  registry: ToolRegistry,
+  workspace: string,
+  guard?: ConflictGuard,
+): void {
+  const applyPatchFunc = makeApplyPatch(workspace, guard);
   registry.register(
     (args) => applyPatchFunc(args),
     { category: "filesystem", riskLevel: "medium", capabilities: ["edit_file"], requiresApproval: true },
@@ -410,7 +429,7 @@ export function registerDiffTools(registry: ToolRegistry, workspace: string): vo
     },
   );
 
-  const applyUnifiedDiffFunc = makeApplyUnifiedDiff(workspace);
+  const applyUnifiedDiffFunc = makeApplyUnifiedDiff(workspace, guard);
   registry.register(
     (args) => applyUnifiedDiffFunc(args),
     { category: "filesystem", riskLevel: "medium", capabilities: ["edit_file"], requiresApproval: true },

@@ -13,7 +13,7 @@ import type {
 import type { TokenUsage } from "../engine/types.js";
 import { MarkdownRenderer } from "./MarkdownRenderer.js";
 import { formatTokens } from "./compaction.js";
-import { networkErrorHints, paramErrorHints } from "../providers/diagnostics.js";
+import { authErrorHints, networkErrorHints, paramErrorHints } from "../providers/diagnostics.js";
 import { cliLog, cliWrite, UNICODE_SUPPORTED } from "../terminal.js";
 
 /** Markdown 行内转义：工具名按字面渲染，避免 _ * ` 等被当作行内语法 */
@@ -365,6 +365,10 @@ export class ConsoleHook implements EngineHook {
     cliLog(`${this._lead()}❌ 错误: ${error}`);
     // 连接类错误：补可执行的排查建议（DNS/TLS/代理/超时）
     for (const hint of networkErrorHints(error, errorType)) {
+      cliLog(`   💡 ${hint}`);
+    }
+    // 凭据类错误（401/403）：指出 Key 为什么失效、去哪儿换
+    for (const hint of authErrorHints(error, errorType)) {
       cliLog(`   💡 ${hint}`);
     }
     // 模型/参数类错误（如阿里兼容模式的 InvalidParameter）：指出换模型

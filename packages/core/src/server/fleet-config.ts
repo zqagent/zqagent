@@ -26,10 +26,47 @@ export interface FleetStatusView {
   reconnectCount?: number;
 }
 
-/** 运行时云端接入控制器：查询 / 凭码接入 / 解绑（热接入，免重启） */
+/** 运行时云端接入控制器：查询 / 凭码或账号接入 / 解绑（热接入，免重启） */
+export interface FleetAccountAuth {
+  email?: string;
+  phone?: string;
+  password?: string;
+  /** 短信验证码 */
+  smsCode?: string;
+}
+
+export interface FleetEnrollInput {
+  hubUrl: string;
+  /** 一次性接入码；与 account / hubToken 三选一 */
+  code?: string;
+  /** Hub 账号凭据；与 code / hubToken 三选一 */
+  account?: FleetAccountAuth;
+  /**
+   * 已登录的 Hub 令牌；与 code / account 三选一。
+   *
+   * 桌面端登录后自动接入用：短信验证码登录时验证码已被消费，
+   * 无法再次走账号口令校验，令牌是唯一可复用的凭据。
+   */
+  hubToken?: string;
+  label?: string;
+}
+
+/** 改名结果：本地是否已生效、Hub 记录是否同步成功 */
+export interface FleetRenameResult extends FleetStatusView {
+  /** 是否已写入 Hub 记录（未接入 Hub 或同步失败时为 false） */
+  hubSynced: boolean;
+  /** 同步 Hub 失败的原因（`hubSynced=false` 且有触发过同步时有值） */
+  hubError?: string;
+}
+
 export interface FleetController {
   status(): FleetStatusView;
-  enroll(input: { hubUrl: string; code: string; label?: string }): Promise<FleetStatusView>;
+  enroll(input: FleetEnrollInput): Promise<FleetStatusView>;
+  /**
+   * 修改节点显示名：写本地 node.json / fleet.json 并立即上报，
+   * 已接入 Hub 时同时更新 Hub 的节点记录（Hub 界面读的是那份）。
+   */
+  rename(label: string): Promise<FleetRenameResult>;
   unlink(): void;
   /** 当前配对凭据（供 GET /api/v1/fleet/pairing；未接入时 null） */
   pairing(): {

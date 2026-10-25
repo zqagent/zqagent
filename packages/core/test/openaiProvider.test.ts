@@ -12,6 +12,9 @@
  *   - OPENAI_FORCE_API_MODE 强制模式
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import { OpenAIProvider } from "../src/providers/OpenAIProvider.js";
 import type { Message, StreamChunk, ToolSchema } from "../src/engine/types.js";
 
@@ -507,5 +510,132 @@ describe("OpenAIProvider.stream — 流内 response.failed 降级（阿里兼容
       collect(await provider.stream("m", MSGS, [], OPTS)),
     ).rejects.toThrow();
     expect(chatCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("OpenAIProvider — 用户附件（图片/音频/视频）", () => {
+  const IMG = {
+    name: "a.png",
+    mimeType: "image/png",
+    dataUrl: "data:image/png;base64,AAAA",
+  };
+  const MP3 = {
+    name: "a.mp3",
+    mimeType: "audio/mpeg",
+    dataUrl: "data:audio/mpeg;base64,BBBB",
+  };
+
+  it("Chat：图片转为 image_url content part（DeepSeek/OpenAI 通用格式）", async () => {
+    vi.stubEnv("OPENAI_FORCE_API_MODE", "chat");
+    const { provider, chatCreate, responsesCreate } = makeProvider();
+    chatCreate.mockResolvedValue(
+      chatChunksOf({
+        usage: null,
+        choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
+      }),
+    );
+
+    await collect(
+      await provider.stream(
+        "deepseek-flash",
+        [{ role: "user", content: "看图", attachments: [IMG] }],
+        [],
+        OPTS,
+      ),
+    );
+
+    const sent = chatCreate.mock.calls[0]![0] as any;
+    expect(sent.messages[0].content).toEqual([
+      { type: "text", text: "看图" },
+      { type: "image_url", image_url: { url: IMG.dataUrl } },
+    ]);
+    expect(responsesCreate).not.toHaveBeenCalled();
+  });
+
+  it("Responses：图片转为 input_image part", async () => {
+    const { provider, responsesCreate, chatCreate } = makeProvider();
+    responsesCreate.mockResolvedValue(
+      eventsOf({ type: "response.completed", response: { status: "completed", usage: {} } }),
+    );
+
+    await collect(
+      await provider.stream(
+        "deepseek-flash",
+        [{ role: "user", content: "看图", attachments: [IMG] }],
+        [],
+        OPTS,
+      ),
+    );
+
+    const sent = responsesCreate.mock.calls[0]![0] as any;
+    expect(sent.input).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: "看图" },
+          { type: "input_image", image_url: IMG.dataUrl },
+        ],
+      },
+    ]);
+    expect(chatCreate).not.toHaveBeenCalled();
+  });
+
+  it("音频附件：Responses 无对应 part，直接走 Chat（input_audio）", async () => {
+    const { provider, responsesCreate, chatCreate } = makeProvider();
+    chatCreate.mockResolvedValue(
+      chatChunksOf({
+        usage: null,
+        choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
+      }),
+    );
+
+    await collect(
+      await provider.stream(
+        "whisper-compatible",
+        [{ role: "user", content: "听一下", attachments: [MP3] }],
+        [],
+        OPTS,
+      ),
+    );
+
+    expect(responsesCreate).not.toHaveBeenCalled();
+    const sent = chatCreate.mock.calls[0]![0] as any;
+    expect(sent.messages[0].content[1]).toEqual({
+      type: "input_audio",
+      input_audio: { data: "BBBB", format: "mp3" },
+    });
+  });
+
+  it("审计日志只记录附件摘要，不写入 base64 载荷", async () => {
+    vi.stubEnv("OPENAI_FORCE_API_MODE", "chat");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zqagent-log-"));
+    const provider = new OpenAIProvider({
+      apiKey: "sk-test",
+      baseURL: "https://api.example.com",
+      logDir: dir,
+    });
+    const client = (provider as any).client as Record<string, any>;
+    const chatCreate = vi.fn().mockResolvedValue(
+      chatChunksOf({
+        usage: null,
+        choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
+      }),
+    );
+    client.chat = { completions: { create: chatCreate } };
+
+    await collect(
+      await provider.stream(
+        "gpt-4o",
+        [{ role: "user", content: "看图", attachments: [IMG] }],
+        [],
+        { ...OPTS, logTime: new Date().toISOString() },
+      ),
+    );
+
+    const day = new Date().toISOString().split("T")[0]!;
+    const file = path.join(dir, day, `${OPTS.reqId}.json`);
+    const json = fs.readFileSync(file, "utf-8");
+    expect(json).toContain('"mimeType": "image/png"');
+    expect(json).not.toContain("data:image/png;base64");
   });
 });

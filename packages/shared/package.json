@@ -31,6 +31,11 @@
       "import": "./dist/llm-presets.js",
       "require": "./dist/llm-presets.cjs"
     },
+    "./model-capabilities": {
+      "types": "./dist/model-capabilities.d.ts",
+      "import": "./dist/model-capabilities.js",
+      "require": "./dist/model-capabilities.cjs"
+    },
     "./hub-api": {
       "types": "./dist/hub-api.d.ts",
       "import": "./dist/hub-api.js",
@@ -55,7 +60,9 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "nodemailer": "^10.0.16"
@@ -64,6 +71,8 @@
     "@types/node": "^22.20.1",
     "@types/nodemailer": "^8.0.2",
     "tsup": "^8.5.1",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.10",
+    "@vitest/coverage-v8": "^4.1.10"
   }
 }

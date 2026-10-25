@@ -19,6 +19,7 @@ import * as path from "node:path";
 import { ToolRegistry } from "./ToolRegistry.js";
 import { execAsync } from "./execAsync.js";
 import { decodeOutput } from "./shell.js";
+import { isInsideRelative } from "./pathSafety.js";
 
 interface GitRunResult {
   status: number;
@@ -75,7 +76,7 @@ function repoDirArg(workspace: string, raw: unknown): string | undefined {
   const base = path.resolve(workspace);
   const abs = path.resolve(base, v);
   const rel = path.relative(base, abs);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) return undefined;
+  if (!isInsideRelative(rel)) return undefined;
   return abs;
 }
 
@@ -85,7 +86,7 @@ function toPathspec(repoRoot: string, workspace: string, pathArg?: string): stri
   const abs = path.resolve(workspace, pathArg);
   let rel = path.relative(repoRoot, abs);
   if (rel === "") return ".";
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+  if (!isInsideRelative(rel)) {
     // repoRoot（git --show-toplevel 输出）与 abs 的路径形式可能不一致：
     // 符号链接（macOS /var→/private/var）、Windows 短路径/大小写/盘符形式等。
     // 用 realpath 归一后再算一次；仍无法表达就返回 null（退回整仓，而非报错）。
@@ -94,7 +95,7 @@ function toPathspec(repoRoot: string, workspace: string, pathArg?: string): stri
       const realAbs = fs.realpathSync(abs);
       const rel2 = path.relative(realRepo, realAbs);
       if (rel2 === "") return ".";
-      if (!rel2.startsWith("..") && !path.isAbsolute(rel2)) return rel2;
+      if (isInsideRelative(rel2)) return rel2;
     } catch {
       /* 路径不存在等：忽略 */
     }

@@ -24,8 +24,11 @@ import * as path from "path";
  * 逃逸必然恰好是 `..` 或以 `..` + 分隔符开头，不能用 `startsWith("..")`：
  * 工作区里名为 `..foo` 的合法条目会被误判为逃逸而拒绝。
  * 跨盘符时（Windows）path.relative 返回绝对路径，一并拒绝。
+ *
+ * 导出供自行做 `path.relative` 校验的调用方复用（如目录浏览新建目录、
+ * git 面板的 repo / path 参数），避免各处重复写 `startsWith("..")`。
  */
-function isInsideRelative(rel: string): boolean {
+export function isInsideRelative(rel: string): boolean {
   return (
     !path.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`)
   );

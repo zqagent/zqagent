@@ -6,11 +6,13 @@
  *   - 运行模式（只读模式硬阻断写入与 shell）
  *   - 工具风险分类（读 / 写 / 执行 / 外部）
  *   - 写入路径是否在可写根目录内
+ *   - shell 是否可免审（OS 沙箱生效 / 命令路径都在工作区内）
  *   - 命令是否命中白名单（且不含 shell 运算符）
  *   - 会话级白名单（用户选择「总是允许」后生效）
  */
 import { RiskClass, type ToolMetadata } from "../tools/ToolRegistry.js";
 import { isWithinRoot } from "../tools/pathSafety.js";
+import { assessCommand } from "./workspaceGuard.js";
 
 /** 权限模式 (对齐 Python 版 Mode) */
 export enum Mode {
@@ -32,6 +34,26 @@ export interface Decision {
   reason: string;
   /** 是否需要用户审批 */
   needsUser: boolean;
+}
+
+/**
+ * shell 免审策略
+ *
+ * - `approve`：除白名单外一律审批（默认，保持既有语义）
+ * - `sandbox`：仅当 OS 级沙箱生效时免审，否则审批
+ * - `workspace`：沙箱生效 → 免审；未生效 → 用工作区路径判定兜底
+ * - `all`：shell 全部免审（等同只对 shell 生效的 auto 模式）
+ */
+export type ShellPolicy = "approve" | "sandbox" | "workspace" | "all";
+
+/** 权限引擎可见的沙箱状态（由 tools/sandbox.ts 的 SandboxPlan 投影而来） */
+export interface ShellSandboxStatus {
+  /** OS 级文件系统约束是否真正生效 */
+  enforced: boolean;
+  /** 后端标识（sandbox-exec / bwrap / none） */
+  backend: string;
+  /** 状态说明（用于审批理由 / 日志） */
+  reason?: string;
 }
 
 /** 只读模式集合：此模式下所有有副作用的操作都会被拒绝 */
@@ -115,17 +137,29 @@ export class PermissionEngine {
   sessionAllowTools: Set<string>;
   /** 会话级「总是允许此命令」集合 */
   sessionAllowCommands: Set<string>;
+  /** shell 免审策略 */
+  shellPolicy: ShellPolicy;
+  /** 沙箱状态（未传时视为无沙箱） */
+  sandbox: ShellSandboxStatus | null;
+  /** 取当前 shell cwd（用于工作区判定的相对路径解析） */
+  shellCwd?: () => string | null;
 
   constructor(opts: {
     workspaceRoot: string;
     mode: Mode;
     allowedCommands?: string[];
+    shellPolicy?: ShellPolicy;
+    sandbox?: ShellSandboxStatus | null;
+    shellCwd?: () => string | null;
   }) {
     this.workspaceRoot = path.resolve(opts.workspaceRoot);
     this.mode = opts.mode;
     this.allowedCommands = Array.isArray(opts.allowedCommands)
       ? opts.allowedCommands
       : [];
+    this.shellPolicy = opts.shellPolicy ?? "approve";
+    this.sandbox = opts.sandbox ?? null;
+    if (opts.shellCwd) this.shellCwd = opts.shellCwd;
     this.sessionAllowTools = new Set();
     this.sessionAllowCommands = new Set();
   }
@@ -177,7 +211,16 @@ export class PermissionEngine {
       return { allowed: true, reason: "全自动模式", needsUser: false };
     }
 
-    // 5. 命令白名单检查（仅 shell）：命中白名单前缀或会话已允许的命令直接放行
+    // 5. shell 免审策略：沙箱生效时无需逐条审批；沙箱不可用时
+    //    （典型为 Windows）退化为工作区路径判定
+    let shellHint: string | null = null;
+    if (isShell) {
+      const verdict = this._autoAllowShell(String(args["command"] ?? ""));
+      if (verdict.decision) return verdict.decision;
+      shellHint = verdict.hint;
+    }
+
+    // 6. 命令白名单检查（仅 shell）：命中白名单前缀或会话已允许的命令直接放行
     if (isShell) {
       const command = String(args["command"] ?? "");
       if (this._commandAllowed(command)) {
@@ -198,13 +241,64 @@ export class PermissionEngine {
       }
     }
 
-    // 6. Session 白名单：用户选择「总是允许此工具」后无需再审批
+    // 7. Session 白名单：用户选择「总是允许此工具」后无需再审批
     if (this.sessionAllowTools.has(toolName)) {
       return { allowed: true, reason: "会话已允许此工具", needsUser: false };
     }
 
-    // 7. 兜底：需要审批（由 approver 回调决定）
-    return { allowed: false, reason: "需要审批", needsUser: true };
+    // 8. 兜底：需要审批（由 approver 回调决定）
+    return {
+      allowed: false,
+      reason: shellHint ? `需要审批（${shellHint}）` : "需要审批",
+      needsUser: true,
+    };
+  }
+
+  /**
+   * 按 shellPolicy 判断是否可免审。
+   *
+   * 返回 decision 时直接采用；否则 hint 说明「为什么仍需审批」，供审批卡片
+   * 展示（例如 `路径越界: /etc/hosts`），让用户一眼看出风险点。
+   */
+  private _autoAllowShell(command: string): {
+    decision: Decision | null;
+    hint: string | null;
+  } {
+    if (this.shellPolicy === "approve") return { decision: null, hint: null };
+    if (this.shellPolicy === "all") {
+      return {
+        decision: { allowed: true, reason: "shellPolicy=all：shell 免审", needsUser: false },
+        hint: null,
+      };
+    }
+    if (this.sandbox?.enforced) {
+      return {
+        decision: {
+          allowed: true,
+          reason: `系统沙箱生效（${this.sandbox.backend}），仅可写工作区`,
+          needsUser: false,
+        },
+        hint: null,
+      };
+    }
+    if (this.shellPolicy === "sandbox") return { decision: null, hint: null };
+
+    const cwd = this.shellCwd?.() ?? null;
+    const verdict = assessCommand(command, {
+      workspaceRoot: this.workspaceRoot,
+      ...(cwd ? { cwd } : {}),
+    });
+    if (verdict.confined) {
+      return {
+        decision: {
+          allowed: true,
+          reason: `工作区内操作：${verdict.reason}`,
+          needsUser: false,
+        },
+        hint: null,
+      };
+    }
+    return { decision: null, hint: verdict.reason };
   }
 
   /** 将工具加入会话白名单 */
@@ -236,6 +330,11 @@ export class PermissionEngine {
    */
   private _commandAllowed(command: string): boolean {
     if (hasShellOperators(command)) return false;
-    return this.allowedCommands.some((prefix) => command.startsWith(prefix));
+    // 前缀必须在词边界上结束：`ls` 不能放行 `lsof`、`cat` 不能放行 `catfish`
+    return this.allowedCommands.some((prefix) => {
+      const p = String(prefix ?? "").trim();
+      if (!p) return false;
+      return command === p || command.startsWith(`${p} `) || command.startsWith(`${p}\t`);
+    });
   }
 }

@@ -9,15 +9,24 @@
  *     sessions/{sessionId}/
  *       session.json              # 会话物化状态（SavedState 超集）
  *       events.jsonl              # 事件日志（审计 / 重放）
+ *       turns.ndjson              # 轮次索引（派生：会话详情的逐轮列表，可由 events.jsonl 重建）
  *
  * 写操作使用异步 (fs.promises) 以避免阻塞事件循环导致 SSE 心跳断开。
  */
 import * as fs from "fs";
 import * as fsp from "fs/promises";
 import * as path from "path";
+import * as readline from "readline";
 import { randomUUID } from "crypto";
 import type { FleetCredential } from "@zqagent/shared/fleet";
-import type { EventEntry, LlmProviderEntry, SessionRecord, TenantConfig } from "./types.js";
+import { BUILTIN_PROVIDER_ID } from "./llmIds.js";
+import type {
+  EventEntry,
+  LlmProviderEntry,
+  SessionRecord,
+  SessionTurnIndexEntry,
+  TenantConfig,
+} from "./types.js";
 import { dbgMs, dbgNow } from "./dbgTrace.js"; // [dbg] 临时调试，定位后可删
 import {
   decryptKey,
@@ -266,6 +275,199 @@ export class Store {
     }
   }
 
+  /**
+   * 读取事件「一页」：从文件末尾向前，按字节预算取最近的事件。
+   *
+   * - `before` 省略：取最新的 maxBytes 字节
+   * - `before` 指定：只取 seq < before 的事件（向前翻页）
+   *
+   * 为什么不能复用 loadEventsTail：后者只能从文件末尾读固定窗口，
+   * 无法「向前翻页」，而控制台需要滚到顶部继续加载更早的对话。
+   * 这里按块从后往前扫，读到预算或文件头即停；翻了多页之后每次
+   * before 都紧邻上一页，实际只需读 1~2 块。
+   *
+   * 返回按 seq 升序；`hasMore` 表示本页最早一条之前还有更早的事件。
+   */
+  loadEventPage(
+    tenantId: string,
+    sessionId: string,
+    opts: { before?: number; maxBytes: number },
+  ): { events: EventEntry[]; hasMore: boolean } {
+    const p = path.join(this.sessionDir(tenantId, sessionId), "events.jsonl");
+    const { before, maxBytes } = opts;
+    const __t0 = dbgNow(); // [dbg]
+    let fd: number | null = null;
+    try {
+      const size = fs.statSync(p).size;
+      if (size === 0) return { events: [], hasMore: false };
+      fd = fs.openSync(p, "r");
+      const CHUNK = 256 * 1024;
+      let pos = size;
+      /** 已收下的事件（时间升序） */
+      const kept: EventEntry[] = [];
+      let bytes = 0;
+      let hasMore = false;
+      let done = false;
+
+      while (pos > 0 && !done) {
+        const start = Math.max(0, pos - CHUNK);
+        const len = pos - start;
+        const buf = Buffer.allocUnsafe(len);
+        const read = fs.readSync(fd, buf, 0, len, start);
+        const rows = buf.subarray(0, read).toString("utf-8").split("\n");
+        // 块首行可能从中间开始（其行头在 start 之前），丢弃；start===0 时是完整行
+        if (start > 0) rows.shift();
+
+        for (let i = rows.length - 1; i >= 0; i--) {
+          const line = rows[i];
+          if (!line) continue;
+          let entry: EventEntry;
+          try {
+            entry = JSON.parse(line) as EventEntry;
+          } catch {
+            continue; // 正在写入的尾行 / 损坏行
+          }
+          if (!Number.isFinite(Number(entry.seq))) continue;
+          if (before !== undefined && Number(entry.seq) >= before) continue;
+          const sz = Buffer.byteLength(line, "utf-8") + 1;
+          // 至少保留一条，保证翻页总能推进
+          if (bytes > 0 && bytes + sz > maxBytes) {
+            hasMore = true;
+            done = true;
+            break;
+          }
+          bytes += sz;
+          kept.unshift(entry);
+        }
+        pos = start;
+      }
+      dbgMs("store.loadEventPage", __t0, // [dbg]
+        `size=${size} before=${before ?? "-"} out=${kept.length} bytes≈${bytes} more=${hasMore}`);
+      return { events: kept, hasMore };
+    } catch {
+      return { events: [], hasMore: false };
+    } finally {
+      if (fd !== null) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // 忽略
+        }
+      }
+    }
+  }
+
+  // ===================== 轮次索引 =====================
+
+  /** 轮次索引文件路径 */
+  private turnsFile(tenantId: string, sessionId: string): string {
+    return path.join(this.sessionDir(tenantId, sessionId), "turns.ndjson");
+  }
+
+  /**
+   * 追加一轮的最新快照（同一 startSeq 后写者胜出）。
+   *
+   * 走与 session.json 相同的每文件写链：索引按「开轮 → 补充消息 → 收轮」
+   * 顺序追加，乱序会让列表读到旧的 running 版本。
+   */
+  appendTurnIndex(
+    tenantId: string,
+    sessionId: string,
+    entry: SessionTurnIndexEntry,
+  ): Promise<void> {
+    const dir = this.sessionDir(tenantId, sessionId);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = this.turnsFile(tenantId, sessionId);
+    const line = JSON.stringify(entry) + "\n";
+    const prev = this.writeChains.get(file) ?? Promise.resolve();
+    const next = prev
+      .then(() => fsp.appendFile(file, line, "utf-8"))
+      .catch((err) => {
+        // 索引是派生数据：写失败不影响会话本身，下次读时会重建
+        console.error(`[store] appendTurnIndex 失败 ${sessionId}: ${String(err)}`);
+      });
+    this.writeChains.set(file, next);
+    return next;
+  }
+
+  /**
+   * 读取轮次索引（已按 startSeq 去重取最后一版，升序）。
+   *
+   * 文件很小（一轮约 0.5KB，1000 轮 ≈ 500KB），同步读即可，
+   * 会话详情打开路径不会因历史长度变慢。
+   */
+  loadTurnIndex(tenantId: string, sessionId: string): SessionTurnIndexEntry[] {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.turnsFile(tenantId, sessionId), "utf-8");
+    } catch {
+      return [];
+    }
+    const byStart = new Map<number, SessionTurnIndexEntry>();
+    for (const line of raw.split("\n")) {
+      if (!line) continue;
+      try {
+        const e = JSON.parse(line) as SessionTurnIndexEntry;
+        if (!Number.isFinite(Number(e?.startSeq))) continue;
+        byStart.set(Number(e.startSeq), e);
+      } catch {
+        // 正在写入的尾行 / 损坏行：跳过
+      }
+    }
+    return [...byStart.values()].sort((a, b) => a.startSeq - b.startSeq);
+  }
+
+  /** 整文件替换轮次索引（重建用，tmp + rename 原子写） */
+  saveTurnIndex(
+    tenantId: string,
+    sessionId: string,
+    entries: SessionTurnIndexEntry[],
+  ): Promise<void> {
+    const dir = this.sessionDir(tenantId, sessionId);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = this.turnsFile(tenantId, sessionId);
+    const snapshot = entries.map((e) => JSON.stringify(e)).join("\n") + (entries.length ? "\n" : "");
+    const tmp = `${file}.${randomUUID()}.tmp`;
+    const prev = this.writeChains.get(file) ?? Promise.resolve();
+    const next = prev
+      .then(() => fsp.writeFile(tmp, snapshot, "utf-8"))
+      .then(() => fsp.rename(tmp, file))
+      .catch((err) => {
+        console.error(`[store] saveTurnIndex 失败 ${sessionId}: ${String(err)}`);
+        void fsp.rm(tmp, { force: true });
+      });
+    this.writeChains.set(file, next);
+    return next;
+  }
+
+  /**
+   * 流式读取整份事件日志（重建索引用）。
+   *
+   * 不能用 loadEvents（readFileSync + 逐行 JSON.parse）：大会话几十 MB，
+   * 会长时间阻塞事件循环，导致 SSE 心跳 / MQTT 保活断开。
+   */
+  async readEventsAsync(tenantId: string, sessionId: string): Promise<EventEntry[]> {
+    const p = path.join(this.sessionDir(tenantId, sessionId), "events.jsonl");
+    const out: EventEntry[] = [];
+    try {
+      const rl = readline.createInterface({
+        input: fs.createReadStream(p, { encoding: "utf-8" }),
+        crlfDelay: Infinity,
+      });
+      for await (const line of rl) {
+        if (!line) continue;
+        try {
+          out.push(JSON.parse(line) as EventEntry);
+        } catch {
+          // 损坏行跳过
+        }
+      }
+    } catch {
+      return out;
+    }
+    return out;
+  }
+
   // ===================== 节点身份 & 管理员密钥 =====================
 
   /** 节点稳定标识：{root}/node.json（首次启动生成后长期固定） */
@@ -331,7 +533,29 @@ export class Store {
       legacyFiles: [path.join(this.root, "node-llm.json")],
     });
     const old = new Map(cur.providers.map((p) => [p.id, p]));
-    const providers: LlmProviderEntryStored[] = cfg.providers.map((p) => {
+    /*
+     * 内置项兜底：调用方传进来的列表可能不含 `__zqai__`（CLI 删除、老前端、
+     * 或直接改 json 后触发保存）。这里按**已落盘的旧值**补回，确保托管凭据
+     * 不会因为一次保存就消失。真正该移除它的只有「解绑 Hub」，走的是
+     * 清空凭据的路径，不经过这里。
+     */
+    const src = [...cfg.providers];
+    const prevBuiltin = cur.providers.find((p) => p.id === BUILTIN_PROVIDER_ID);
+    if (prevBuiltin && !src.some((p) => p.id === BUILTIN_PROVIDER_ID)) {
+      src.unshift({
+        id: prevBuiltin.id,
+        name: prevBuiltin.name,
+        type: prevBuiltin.type,
+        baseURL: prevBuiltin.baseURL,
+        model: prevBuiltin.model,
+        apiKey: decryptKey(prevBuiltin.apiKeyEnc, file) ?? undefined,
+        reasoningEffort: prevBuiltin.reasoningEffort ?? null,
+        ...(prevBuiltin.models ? { models: prevBuiltin.models } : {}),
+        ...(prevBuiltin.nonChat ? { nonChat: prevBuiltin.nonChat } : {}),
+        ...(prevBuiltin.modelMeta ? { modelMeta: prevBuiltin.modelMeta } : {}),
+      });
+    }
+    const providers: LlmProviderEntryStored[] = src.map((p) => {
       const prev = old.get(p.id);
       // apiKey 为空表示「沿用旧值」（applyNodeLlmPatch 已保证语义）
       const apiKeyEnc = p.apiKey ? encryptKey(p.apiKey, file) : (prev?.apiKeyEnc ?? "");

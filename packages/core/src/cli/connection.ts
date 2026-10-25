@@ -20,6 +20,7 @@ import {
 import type { ReasoningEffort } from "../engine/types.js";
 import type { ModelMeta } from "../providers/models.js";
 import { LLM_PRESETS, llmPreset } from "@zqagent/shared/llm-presets";
+import { BUILTIN_PROVIDER_ID } from "../server/llmIds.js";
 
 /** 统一配置文件路径（惰性：读取时解析，支持环境变量覆盖） */
 export const CONNECTION_FILE = llmConfigFile;
@@ -218,8 +219,14 @@ export function useConnection(id: string): boolean {
   return true;
 }
 
-/** 删除指定供应商；删除当前项时自动切到第一个。 */
+/**
+ * 删除指定供应商；删除当前项时自动切到第一个。
+ *
+ * 平台内置项（志前 API）不可删除：它由控制面下发、Key 由平台托管，
+ * 删掉会让用户失去开箱可用的模型。要停用请在控制台切换默认模型。
+ */
 export function removeConnection(id: string): boolean {
+  if (id === BUILTIN_PROVIDER_ID) return false;
   const f = read();
   const next = f.providers.filter((p) => p.id !== id);
   if (next.length === f.providers.length) return false;
@@ -241,6 +248,8 @@ export { llmPreset };
 
 export {
   fetchModels,
+  fetchModelsWithDiagnostics,
+  describeModelFetchFailure,
   fetchModelContext,
   probeModel,
   isChatModel,

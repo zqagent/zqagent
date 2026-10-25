@@ -36,7 +36,7 @@ Environment variables (all set before startup):
 | `PORT` | Listen port | `8787` |
 | `DATA_DIR` | Root directory for state and tenants | `./.zqagent_data` |
 | `APPROVAL_TIMEOUT_SECONDS` | Suspension timeout for approvals/questions; evicts the in-memory task | `900` |
-| `TENANT_ID` / `TENANT_API_KEY` / `MODEL` | Demo tenant created on first start | `demo` / random / `gpt-4o-mini` |
+| `TENANT_ID` / `TENANT_API_KEY` / `MODEL` | Demo tenant created on first start (no model is assumed when `MODEL` is unset — pick one in the console) | `demo` / random / — |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` | Model configuration for the demo tenant | — |
 
 ## 2. Authentication
@@ -345,6 +345,45 @@ curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application
 # The session list returns name (the console uses it as the title)
 curl -s -H "Authorization: Bearer $TOKEN" $BASE/api/v1/sessions
 ```
+
+## 14. Node self-update (`self_update`)
+
+A remote caller (console UI or the fleet command `self_update`) can have a node download a
+new version and restart itself. After the restart systemd/launchd starts the new binary, which
+reconnects to the Hub automatically using the credentials in the local `fleet.json` — no
+re-enrollment needed. It only works for nodes that are "SEA single-file + service-managed +
+signing public key configured"; other setups (npm install, foreground process, missing key)
+report the reason in `status.reason`.
+
+```bash
+# 1) Status: current version, channel, staged version, rollback target, last error
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"action":"status"}' $BASE/api/v1/node/self-update
+
+# 2) Check: fetch + verify the manifest and compare versions (no download)
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"action":"check"}' $BASE/api/v1/node/self-update
+# => {"data":{"updateAvailable":true,"latestVersion":"0.2.16","currentVersion":"0.2.15"}}
+
+# 3) Install (waits for the node to be idle by default; force=true restarts immediately
+#    and interrupts running tasks)
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"action":"install"}' $BASE/api/v1/node/self-update
+# => {"data":{"accepted":true,"fromVersion":"0.2.15","toVersion":"0.2.16","message":"..."}}
+```
+
+Notes:
+
+- **An accepted ack does not mean the upgrade finished.** The process exits (`exit(70)`) after
+  installing so the service manager can start the new binary; the connection drops meanwhile.
+  Confirm with `action=status` (or the `version` field of `GET /api/v1/node/host`).
+- Do not chain install and restart in one shell command — `zqagent update --now` exits with a
+  non-zero code, so `&& systemctl restart` never runs. Use
+  `nohup sh -c 'zqagent update --now; systemctl restart zqagent' &` if you must do it by hand.
+- Fleet command equivalent: `{"type":"self_update","payload":{"action":"install","force":false}}`.
+- Before replacing anything the node verifies hash + signature + self-check, then re-checks the
+  target path; on failure it rolls back immediately and records `skippedVersion`, so a broken
+  release cannot cause a restart loop.
 
 > Note: the server has supported CORS since 2026-08-08 (`Access-Control-Allow-Origin: *`), so
 > browser cross-origin debugging works directly; since the browser's `EventSource` cannot send

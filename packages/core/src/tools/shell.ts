@@ -30,6 +30,11 @@ import {
 import { ShellTaskManager } from "./shellBackground.js";
 import type { BackgroundTaskSnapshot } from "./shellBackground.js";
 import type { ToolExecContext } from "./ToolRegistry.js";
+import {
+  describeSandbox,
+  wrapWithSandbox,
+  type SandboxPlan,
+} from "./sandbox.js";
 
 /** 输出截断上限（字符） */
 const MAX_STDOUT = 10000;
@@ -38,28 +43,44 @@ const MAX_STDERR = 5000;
 const MAX_BUFFER = 1024 * 1024 * 5;
 
 /**
- * 持久 shell 会话状态：按工作区根目录存放 cwd。
+ * 持久 shell 会话状态：按「工作区 + 归属」存放 cwd。
  *
  * 之所以放在模块级而不是 makeRunShell 的闭包里：CLI 在 /mode、/agent、/model、
  * reset 时会重建引擎（重新调用 registerShellTool），闭包里的 cwd 会随之丢失。
- * 以工作区为键既可跨引擎重建保持，又不会在多租户之间串目录。
+ *
+ * 键必须带上归属（owner）：多个会话共享同一 workspaceRoot 时，如果只按工作区
+ * 做键，A 会话 `cd src` 会让 B 会话的下一条命令也在 src 下执行——两个并行会话
+ * 互相串目录。owner 由调用方给出会话级标识（server 传 tenant/session）。
+ * 未给 owner 时（CLI 单会话）退化为按工作区，保持既有行为。
  */
 const shellSessions = new Map<string, { cwd: string }>();
 
-function sessionFor(workspace: string): { cwd: string } {
+/** 会话键：工作区绝对路径 + 可选的归属标识（用 NUL 分隔，不会与路径字符冲突） */
+function shellKey(workspace: string, owner?: string | null): string {
   // 用规范化后的绝对路径作键：避免尾斜杠 / 相对路径在不同注册点产生两个会话
-  const key = path.resolve(workspace);
+  const root = path.resolve(workspace);
+  const o = String(owner ?? "").trim();
+  return o ? `${root}\u0000${o}` : root;
+}
+
+function sessionFor(workspace: string, owner?: string | null): { cwd: string } {
+  const key = shellKey(workspace, owner);
   let s = shellSessions.get(key);
   if (!s) {
-    s = { cwd: key };
+    s = { cwd: path.resolve(workspace) };
     shellSessions.set(key, s);
   }
   return s;
 }
 
 /** 测试用：重置某个工作区的 shell 会话状态 */
-export function resetShellSession(workspace: string): void {
-  shellSessions.delete(path.resolve(workspace));
+export function resetShellSession(workspace: string, owner?: string | null): void {
+  shellSessions.delete(shellKey(workspace, owner));
+}
+
+/** 当前 shell 会话的 cwd（供权限引擎判定相对路径是否越界） */
+export function getShellCwd(workspace: string, owner?: string | null): string {
+  return sessionFor(workspace, owner).cwd;
 }
 
 /** 解析实际执行的 shell 可执行文件与 argv 构造器（default 时按平台兜底） */
@@ -118,8 +139,15 @@ export function decodeOutput(buf: Buffer | null | undefined): string {
  * 内部维护 cwd 状态：识别 cd / pushd 命令并更新，使后续命令在新目录下执行。
  * 注意：不要用 require()（ESM 下未定义），必须用 import 的 fs/path。
  */
-function makeRunShell(workspace: string, spec: ShellSpec, tasks: ShellTaskManager, scope: string | null) {
-  const session = sessionFor(workspace);
+function makeRunShell(
+  workspace: string,
+  spec: ShellSpec,
+  tasks: ShellTaskManager,
+  scope: string | null,
+  sandbox: SandboxPlan | null,
+  sessionKey: string | null,
+) {
+  const session = sessionFor(workspace, sessionKey);
 
   return async function run_shell(args: Record<string, unknown>, ctx?: ToolExecContext) {
     const command = String(args.command ?? "");
@@ -151,7 +179,13 @@ function makeRunShell(workspace: string, spec: ShellSpec, tasks: ShellTaskManage
     }
 
     const prepared = wrapCommand(spec.kind, toRun);
-    const { file, argv } = resolveInvocation(spec, prepared);
+    // 沙箱在这里套：命令仍是完整的 shell 调用，只是外层多一层
+    // sandbox-exec / bwrap，用来把可写范围收窄到工作区
+    const { file, argv } = wrapWithSandbox(
+      sandbox,
+      resolveInvocation(spec, prepared),
+      { cwd: session.cwd },
+    );
     const env = shellEnv();
 
     // ---- 后台执行 ----
@@ -237,15 +271,27 @@ export function killShellTask(
  * 注册 Shell 工具（高风险：requiresApproval=true，由权限引擎门控）
  *
  * @param scope 后台任务归属（server 传租户 id）；用于按项目过滤任务列表与终止
+ * @param sandbox OS 级沙箱方案（未启用时传 null 或省略）
+ * @param sessionKey shell 会话归属（server 传 tenant/session）。多会话共享同一
+ *   工作区时必须传，否则它们的 cwd 会互相覆盖；CLI 单会话可省略
  */
 export function registerShellTool(
   registry: ToolRegistry,
   workspace: string,
   scope?: string | null,
+  sandbox?: SandboxPlan | null,
+  sessionKey?: string | null,
 ): void {
   const spec = resolveShellSpec();
   const tasks = shellTasks;
-  const shell = makeRunShell(workspace, spec, tasks, scope ?? null);
+  const shell = makeRunShell(
+    workspace,
+    spec,
+    tasks,
+    scope ?? null,
+    sandbox ?? null,
+    sessionKey ?? null,
+  );
 
   registry.register(
     (args, ctx) => shell(args, ctx),
@@ -261,7 +307,10 @@ export function registerShellTool(
           "传递 timeout_seconds 控制超时。" +
           "对于开发服务器 / watch 等长驻进程，设置 run_in_background=true，" +
           "随后用 shell_task_output 轮询输出、shell_task_kill 终止。" +
-          `运行环境：${describeShell(spec, process.platform)}`,
+          `运行环境：${describeShell(spec, process.platform)}` +
+          (sandbox?.enforced
+            ? `沙箱：${describeSandbox(sandbox)}；工作区外的写入会被系统拒绝。`
+            : ""),
         parameters: {
           type: "object",
           properties: {

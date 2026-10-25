@@ -44,7 +44,7 @@
 | `packages/core/src/tools` | 内置工具；每个工具声明风险等级与参数 schema |
 | `packages/core/src/permissions` | 风险分类、运行模式门控、审批决策 |
 | `packages/core/src/providers` | OpenAI 兼容 provider（流式 / 非流式），含重试与诊断 |
-| `packages/core/src/mcp` | MCP 客户端（stdio / HTTP），工具动态注入 |
+| `packages/core/src/mcp` | MCP 客户端（stdio / http / sse / builtin）、配置归一化与导入、按需加载、内置 OCR |
 | `packages/core/src/agents` | Agent 注册表（名称 + Prompt + 可选模型） |
 | `packages/core/src/cli` | 交互式 CLI、连接向导、会话管理 |
 | `packages/core/src/server` | 多租户 HTTP 服务、项目/会话/用量、节点接入 |

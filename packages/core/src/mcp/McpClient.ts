@@ -2,9 +2,11 @@
  * MCP 客户端（McpClient）
  *
  * 基于 @modelcontextprotocol/sdk 封装单个 MCP 服务器的连接与工具调用，
- * 支持两种传输：
+ * 支持四种传输：
  *   - stdio：本地子进程（如 `npx -y @some/mcp-server`）
  *   - http ：远程 streamable HTTP 端点
+ *   - sse  ：远程 SSE 端点（旧协议，兼容 Claude/Cursor 配置）
+ *   - builtin：进程内内置服务器（InMemoryTransport，如内置 OCR）
  *
  * 提供工具列表拉取、工具调用（结果归一化为文本）、连接生命周期管理，
  * 以及 OpenAI 工具名兼容的命名工具（sanitize + 前缀）。
@@ -13,16 +15,24 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { createBuiltinTransport } from "./builtin/index.js";
+import type { McpBuiltinContext } from "./builtin/types.js";
+
+/** 传输类型 */
+export type McpTransportType = "stdio" | "http" | "sse" | "builtin";
 
 /** MCP 服务器配置 */
 export interface McpServerConfig {
   /** 服务器名称（唯一标识，也是注册到 ToolRegistry 的工具名前缀） */
   name: string;
-  /** 传输类型：stdio=本地子进程 / http=远程端点 */
-  type: "stdio" | "http";
+  /** 传输类型：stdio=本地子进程 / http=远程端点 / sse=旧版远程端点 / builtin=进程内内置服务器 */
+  type: McpTransportType;
   /** stdio 传输：启动命令，如 ["npx","-y","@modelcontextprotocol/server-filesystem","/tmp"] */
   command?: string[];
+  /** stdio 传输：子进程工作目录（相对路径按当前进程 cwd 解析） */
+  cwd?: string;
   /** http 传输：远程端点 URL */
   url?: string;
   /** http 传输：自定义请求头（如 Authorization） */
@@ -31,6 +41,14 @@ export interface McpServerConfig {
   env?: Record<string, string>;
   /** 是否启用（默认 true；禁用时不连接、不注册工具） */
   enabled?: boolean;
+  /** builtin 传输：内置服务器标识（缺省时使用 name，如 "ocr"） */
+  builtin?: string;
+}
+
+/** McpClient 构造选项 */
+export interface McpClientOptions {
+  /** 内置服务器运行时上下文（仅 type=builtin 时使用） */
+  builtin?: McpBuiltinContext;
 }
 
 /** 从服务器拉取到的单个工具信息 */
@@ -63,14 +81,26 @@ export function mcpToolKey(server: string, tool: string): string {
   return `mcp__${s}__${t}`;
 }
 
+/**
+ * MCP 工具调用超时（默认 5 分钟）。
+ * SDK 默认 60s，对首次编译的 Vision OCR 或大 PDF 逐页识别都偏短；
+ * 可用 MCP_CALL_TIMEOUT_MS 覆盖。
+ */
+function callTimeoutMs(): number {
+  const raw = Number(process.env.MCP_CALL_TIMEOUT_MS ?? "");
+  return Number.isFinite(raw) && raw > 0 ? raw : 300_000;
+}
+
 export class McpClient {
   readonly config: McpServerConfig;
+  private options: McpClientOptions;
   private client: Client | null = null;
   private transport: { close(): Promise<void> } | null = null;
   private _tools: McpToolInfo[] = [];
 
-  constructor(config: McpServerConfig) {
+  constructor(config: McpServerConfig, options: McpClientOptions = {}) {
     this.config = { ...config };
+    this.options = options;
   }
 
   get name(): string {
@@ -91,7 +121,12 @@ export class McpClient {
     const client = new Client({ name: "zqagent", version: "0.1.0" });
     let transport: Transport;
 
-    if (this.config.type === "stdio") {
+    if (this.config.type === "builtin") {
+      transport = await createBuiltinTransport(
+        this.config,
+        this.options.builtin ?? {},
+      );
+    } else if (this.config.type === "stdio") {
       const [command, ...args] = this.config.command ?? [];
       if (!command) {
         throw new Error(`MCP server "${this.config.name}" 缺少 command`);
@@ -100,7 +135,17 @@ export class McpClient {
         command,
         args,
         env: this.config.env,
+        cwd: this.config.cwd,
         stderr: "inherit",
+      });
+    } else if (this.config.type === "sse") {
+      if (!this.config.url) {
+        throw new Error(`MCP server "${this.config.name}" 缺少 url`);
+      }
+      transport = new SSEClientTransport(new URL(this.config.url), {
+        requestInit: this.config.headers
+          ? { headers: this.config.headers }
+          : undefined,
       });
     } else {
       if (!this.config.url) {
@@ -148,7 +193,11 @@ export class McpClient {
     if (!this.client) {
       throw new Error(`MCP server "${this.config.name}" 未连接`);
     }
-    const res = await this.client.callTool({ name, arguments: args });
+    const res = await this.client.callTool(
+      { name, arguments: args },
+      undefined,
+      { timeout: callTimeoutMs() },
+    );
     const contents = Array.isArray(res.content) ? res.content : [];
     const text = contents
       .map((c) => {

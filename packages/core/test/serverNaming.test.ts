@@ -84,10 +84,19 @@ describe("会话自动命名（server）", () => {
       manager.submitTurn(tenant, rec.sessionId, `任务 ${i + 1}`);
       await waitFor(() => {
         const s = manager.getSession(tenant.id, rec.sessionId)!;
-        return s.status === "completed" && manager.runtimeInfo(rec.sessionId)?.inMemoryRun === false;
+        // 必须把 taskCount 也纳入条件：getSession 读的是磁盘（_persist 异步写），
+        // runtimeInfo 读的是内存。两者不同步时，磁盘可能还停在上一次的 completed，
+        // 只看 status 会在本轮结束前就误判为「已完成」，断言随即读到旧的计数。
+        return (
+          s.status === "completed" &&
+          s.taskCount === i + 1 &&
+          manager.runtimeInfo(rec.sessionId)?.inMemoryRun === false
+        );
       });
     }
     // 计数到 3，但用户已手动命名 → 不再自动生成
+    // _persist 是异步落盘，这里等磁盘追平再断言，否则会读到上一轮的计数
+    await waitFor(() => manager.getSession(tenant.id, rec.sessionId)!.taskCount === 3);
     const s = manager.getSession(tenant.id, rec.sessionId)!;
     expect(s.taskCount).toBe(3);
     expect(s.name).toBe("我的标题");

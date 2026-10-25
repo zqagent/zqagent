@@ -147,6 +147,19 @@ in English; those three are currently Chinese only.
 
 User-facing guides (installation, CLI usage, agents, MCP): <https://agent.cd-zq.com/en/>
 
+## Community
+
+User group (WeChat, mainly in Chinese): scan to join — ask questions, report bugs, and request
+features without sending a friend request. When a group fills up, new members are routed to a
+fresh group automatically, so the same code keeps working.
+
+<img src="https://agent.cd-zq.com/wecom-group.png" alt="ZQAgent user group QR code" width="200" />
+
+Group rules and more ways to reach us: <https://agent.cd-zq.com/en/community/>
+
+Prefer not to use WeChat? Open an issue at
+[GitHub Issues](https://github.com/__OSS_REPO__/issues).
+
 ## Development
 
 ```bash

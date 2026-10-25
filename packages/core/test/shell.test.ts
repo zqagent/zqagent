@@ -282,3 +282,43 @@ describe("后台任务的归属（scope）", () => {
     }
   });
 });
+
+describe("shell 会话按归属隔离 cwd", () => {
+  /**
+   * 多个会话共享同一 workspaceRoot 时（server 的常态），如果 cwd 只按工作区
+   * 做键，A 会话 `cd` 会让 B 会话的下一条命令跑到别的目录——并行会话互相干扰。
+   */
+  it.skipIf(!posix)("不同 sessionKey 的会话互不影响", async () => {
+    const sub = path.join(workspace, "sub");
+    fs.mkdirSync(sub, { recursive: true });
+
+    const a = new ToolRegistry();
+    registerShellTool(a, workspace, null, null, "tenant/sess-a");
+    const b = new ToolRegistry();
+    registerShellTool(b, workspace, null, null, "tenant/sess-b");
+
+    // A 切到 sub，B 仍应停在根目录
+    await a.execute("run_shell", { command: `cd ${sub}` });
+
+    const fromA = (await a.execute("run_shell", { command: "pwd" })) as Record<string, unknown>;
+    const fromB = (await b.execute("run_shell", { command: "pwd" })) as Record<string, unknown>;
+
+    expect(fs.realpathSync(String(fromA.stdout).trim())).toBe(fs.realpathSync(sub));
+    expect(fs.realpathSync(String(fromB.stdout).trim())).toBe(fs.realpathSync(workspace));
+  });
+
+  it.skipIf(!posix)("同一 sessionKey 重建注册后 cwd 仍保持", async () => {
+    const sub = path.join(workspace, "keep");
+    fs.mkdirSync(sub, { recursive: true });
+
+    const first = new ToolRegistry();
+    registerShellTool(first, workspace, null, null, "tenant/sess-keep");
+    await first.execute("run_shell", { command: `cd ${sub}` });
+
+    // 引擎重建（/mode、/agent 等）会重新注册工具，cwd 不能丢
+    const rebuilt = new ToolRegistry();
+    registerShellTool(rebuilt, workspace, null, null, "tenant/sess-keep");
+    const result = (await rebuilt.execute("run_shell", { command: "pwd" })) as Record<string, unknown>;
+    expect(fs.realpathSync(String(result.stdout).trim())).toBe(fs.realpathSync(sub));
+  });
+});

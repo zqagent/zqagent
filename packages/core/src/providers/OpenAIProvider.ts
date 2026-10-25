@@ -51,7 +51,52 @@ import type {
   TokenUsage,
   ReasoningEffort,
 } from "../engine/types.js";
+import type { MessageAttachment } from "../engine/attachments.js";
+import { hasNonImageAttachments } from "../engine/attachments.js";
+import { capabilityOfMime } from "@zqagent/shared/model-capabilities";
 import { RequestOptions } from "openai/core.mjs";
+
+/**
+ * base64 data URL → 纯 base64 载荷（`input_audio.data` 只要载荷）
+ */
+function base64Payload(dataUrl: string): string {
+  const comma = dataUrl.indexOf(",");
+  return comma < 0 ? dataUrl : dataUrl.slice(comma + 1);
+}
+
+/** OpenAI `input_audio.format` 只接受 wav/mp3；其它音频格式不发送（供应商也不支持） */
+function audioFormat(mimeType: string): "wav" | "mp3" | null {
+  switch (mimeType.toLowerCase()) {
+    case "audio/wav":
+    case "audio/x-wav":
+    case "audio/wave":
+      return "wav";
+    case "audio/mpeg":
+    case "audio/mp3":
+      return "mp3";
+    default:
+      return null;
+  }
+}
+
+/**
+ * 审计日志用的消息视图：附件只保留「类型 + 大小」，不写 base64 载荷。
+ * 只用于日志，不影响真正发给模型的请求。
+ */
+function redactAttachmentData<T>(messages: T[]): unknown[] {
+  return messages.map((m) => {
+    const rec = m as Record<string, unknown> | null;
+    if (!rec || typeof rec !== "object" || !Array.isArray(rec.attachments)) return m;
+    return {
+      ...rec,
+      attachments: (rec.attachments as MessageAttachment[]).map((a) => ({
+        name: a.name,
+        mimeType: a.mimeType,
+        bytes: a.dataUrl.length,
+      })),
+    };
+  });
+}
 
 /** stream 方法的可选参数 */
 export interface StreamOpts {
@@ -294,7 +339,7 @@ export class OpenAIProvider implements ProviderClient {
       this._writeRequestLog(reqId, model, messages, undefined, opts.logTime);
 
       // ---- Responses API 路径 ----
-      if (this._resolveMode(model) === "responses") {
+      if (this._resolveMode(model) === "responses" && !hasNonImageAttachments(messages as unknown as Message[])) {
         try {
           const response = await this.client.responses.create({
             model,
@@ -394,7 +439,8 @@ export class OpenAIProvider implements ProviderClient {
     const requestOptions = { signal: controller.signal } as RequestOptions;
 
     // ---- Responses API 路径（默认优先）----
-    if (this._resolveMode(model) === "responses") {
+    // Responses 只支持图片（`input_image`）；音频/视频附件必须走 Chat Completions。
+    if (this._resolveMode(model) === "responses" && !hasNonImageAttachments(messages)) {
       try {
         // stream:true 时 SDK 返回 Stream<ResponseStreamEvent>；
         // 参数经 as any 传入后 TS 匹配到非流式 overload，此处显式收窄
@@ -556,7 +602,15 @@ export class OpenAIProvider implements ProviderClient {
   // 消息 / 工具格式转换
   // =====================================================================
 
-  /** 将内部 Message 转换为 OpenAI Chat Completions 格式 */
+  /**
+   * 内部 Message → Chat Completions 消息。
+   *
+   * 带附件时 `content` 变为数组（DeepSeek 与 OpenAI 的通用格式）：
+   *   - 文本 → `{type:"text"}`
+   *   - 图片 → `{type:"image_url", image_url:{url:"data:..."}}`（≤32MiB）
+   *   - 音频 → `{type:"input_audio"}`（仅 wav/mp3，DeepSeek 目前不支持）
+   *   - 视频 → `{type:"video_url"}`（供应商私有扩展，DeepSeek 目前不支持）
+   */
   private _toOpenAIMessages(messages: Message[]): ChatCompletionMessageParam[] {
     return (
       messages
@@ -565,13 +619,40 @@ export class OpenAIProvider implements ProviderClient {
         .map((m) => {
           const base: Record<string, unknown> = {
             role: m.role,
-            content: m.content,
+            content: m.attachments?.length
+              ? this._toOpenAIContent(m.content, m.attachments)
+              : m.content,
           };
           if (m.tool_calls) base.tool_calls = m.tool_calls;
           if (m.tool_call_id) base.tool_call_id = m.tool_call_id;
           return base as unknown as ChatCompletionMessageParam;
         })
     );
+  }
+
+  /** 文本 + 附件 → Chat Completions 的 content part 数组 */
+  private _toOpenAIContent(
+    text: string,
+    attachments: MessageAttachment[],
+  ): unknown[] {
+    const parts: unknown[] = [];
+    if (text) parts.push({ type: "text", text });
+    for (const a of attachments) {
+      const cap = capabilityOfMime(a.mimeType);
+      if (cap === "image") {
+        parts.push({ type: "image_url", image_url: { url: a.dataUrl } });
+      } else if (cap === "audio") {
+        const format = audioFormat(a.mimeType);
+        if (!format) continue;
+        parts.push({
+          type: "input_audio",
+          input_audio: { data: base64Payload(a.dataUrl), format },
+        });
+      } else if (cap === "video") {
+        parts.push({ type: "video_url", video_url: { url: a.dataUrl } });
+      }
+    }
+    return parts;
   }
 
   /**
@@ -605,10 +686,15 @@ export class OpenAIProvider implements ProviderClient {
       if (m.role === "system" || m.role === "user" || m.role === "assistant") {
         // 常规消息：system/user 用 input_text，assistant 用 output_text
         const textBlockType = m.role === "assistant" ? "output_text" : "input_text";
-        items.push({
-          role: m.role,
-          content: [{ type: textBlockType, text: m.content ?? "" }],
-        });
+        // 附件：Responses 只有 input_image（音频/视频已在入口处改走 Chat）
+        // 且仅允许出现在 user 消息里（system/assistant 带图会被供应商 400）
+        const content: unknown[] = [{ type: textBlockType, text: m.content ?? "" }];
+        for (const a of m.role === "user" ? (m.attachments ?? []) : []) {
+          if (capabilityOfMime(a.mimeType) === "image") {
+            content.push({ type: "input_image", image_url: a.dataUrl });
+          }
+        }
+        items.push({ role: m.role, content });
 
         // assistant 的历史工具调用 → 追加 function_call items
         if (m.role === "assistant" && m.tool_calls) {
@@ -692,7 +778,9 @@ export class OpenAIProvider implements ProviderClient {
         request: {
           model,
           messageCount: messages.length,
-          messages,
+          // 附件是 base64 data URL：日志里只留长度摘要，否则一张 10MB 的图
+          // 会让单个审计文件膨胀十几 MB（附件本就不落盘）
+          messages: redactAttachmentData(messages),
           toolCount: tools?.length ?? 0,
           toolNames: tools?.map((t) => t.function.name) ?? [],
         },

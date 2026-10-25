@@ -9,9 +9,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   fetchModels,
+  mergeModelMeta,
+  modelCapabilities,
   modelContextWindow,
   normalizeModelMeta,
 } from "../src/providers/models.js";
+import { suggestedCapabilities } from "@zqagent/shared/model-capabilities";
 
 /** 构造一个最小可用的 Response 形状 */
 function mockResponse(body: unknown, ok = true) {
@@ -61,6 +64,83 @@ describe("normalizeModelMeta", () => {
   it("非数组输入返回 undefined", () => {
     expect(normalizeModelMeta(undefined)).toBeUndefined();
     expect(normalizeModelMeta({ id: "a" })).toBeUndefined();
+  });
+
+  it("保留合法能力、丢弃未知值（供应商配置里手工勾选的输入类型）", () => {
+    expect(
+      normalizeModelMeta([
+        { id: "deepseek-flash", contextWindow: 1_000_000, capabilities: ["text", "image"] },
+        { id: "b", capabilities: ["image", "IMAGE", "pdf", 1, "text"] },
+        { id: "c", capabilities: [] },
+      ]),
+    ).toEqual([
+      { id: "deepseek-flash", contextWindow: 1_000_000, capabilities: ["text", "image"] },
+      { id: "b", capabilities: ["image", "text"] },
+      { id: "c" },
+    ]);
+  });
+});
+
+describe("modelCapabilities", () => {
+  const meta = [
+    { id: "deepseek-flash", capabilities: ["text", "image"] as const },
+    { id: "deepseek-v4-flash-something", capabilities: ["text", "audio"] as const },
+    { id: "plain" },
+  ];
+
+  it("精确匹配优先于前缀匹配", () => {
+    expect(modelCapabilities([...meta] as never, "deepseek-flash")).toEqual(["text", "image"]);
+  });
+
+  it("日期后缀等变体走前缀匹配", () => {
+    expect(modelCapabilities([...meta] as never, "deepseek-flash-1017")).toEqual([
+      "text",
+      "image",
+    ]);
+  });
+
+  it("未配置能力时只按文本处理（避免把图发给不支持视觉的模型）", () => {
+    expect(modelCapabilities([...meta] as never, "plain")).toEqual(["text"]);
+    expect(modelCapabilities(undefined, "anything")).toEqual(["text"]);
+    expect(modelCapabilities([...meta] as never, "")).toEqual(["text"]);
+  });
+});
+
+describe("mergeModelMeta", () => {
+  it("刷新后保留用户勾选的能力，同时采用新的上下文长度", () => {
+    const old = [{ id: "deepseek-flash", capabilities: ["text", "image"] as const }];
+    const fresh = [{ id: "deepseek-flash", contextWindow: 1_000_000 }];
+    expect(mergeModelMeta([...old] as never, fresh)).toEqual([
+      { id: "deepseek-flash", contextWindow: 1_000_000, capabilities: ["text", "image"] },
+    ]);
+  });
+
+  it("base（用户勾选）的能力优先于 patch 自带的值", () => {
+    const old = [{ id: "m", capabilities: ["text", "image"] as const }];
+    const fresh = [{ id: "m", capabilities: ["text", "audio"] as const }];
+    expect(mergeModelMeta([...old] as never, [...fresh] as never)).toEqual([
+      { id: "m", capabilities: ["text", "image"] },
+    ]);
+  });
+
+  it("只有一边有数据时直接返回那一边", () => {
+    const meta = [{ id: "m", contextWindow: 100 }];
+    expect(mergeModelMeta(undefined, meta)).toBe(meta);
+    expect(mergeModelMeta(meta, undefined)).toBe(meta);
+  });
+});
+
+describe("suggestedCapabilities", () => {
+  it("已知视觉模型给「文本 + 图片」的初始值", () => {
+    expect(suggestedCapabilities("deepseek-flash")).toEqual(["text", "image"]);
+    expect(suggestedCapabilities("gpt-4o-mini")).toEqual(["text", "image"]);
+    expect(suggestedCapabilities("qwen2.5-vl-72b")).toEqual(["text", "image"]);
+  });
+
+  it("未知/纯文本模型只建议文本", () => {
+    expect(suggestedCapabilities("qwen-plus")).toEqual(["text"]);
+    expect(suggestedCapabilities("deepseek-reasoner")).toEqual(["text"]);
+    expect(suggestedCapabilities("")).toEqual(["text"]);
   });
 });
 

@@ -217,15 +217,23 @@ export interface CompactionState {
 
 // ==================== Token 估算 ====================
 
-/** chars/4 估算 token 数（对齐 Python 版 estimate_tokens） */
+/**
+ * chars/4 估算 token 数（对齐 Python 版 estimate_tokens）。
+ *
+ * 附件（base64 data URL）按「每张 1024 token」固定估算——DeepSeek 文档给出的
+ * 单图上限。直接 JSON.stringify 会把 base64 当成文本，几 MB 的图能凭空算出
+ * 几十万 token，导致上下文压缩被误触发。
+ */
 export function estimateTokens(messages: Message[]): number {
   let total = 0;
   for (const m of messages) {
+    const { attachments, ...rest } = m;
     try {
-      total += JSON.stringify(m).length;
+      total += JSON.stringify(rest).length;
     } catch {
-      total += String(m).length;
+      total += String(rest).length;
     }
+    total += (attachments?.length ?? 0) * 1024 * 4;
   }
   return Math.floor(total / 4);
 }

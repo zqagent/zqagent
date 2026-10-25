@@ -16,8 +16,10 @@
  *     const registry = new ToolRegistry();
  *     // ... 注册自定义工具
  *     const permissions = new PermissionEngine({ workspaceRoot: ".", mode: Mode.AUTO });
- *     const engine = new TurnEngine({ provider, registry, permissions, model: "gpt-4o", instructions: "..." });
+ *     const engine = new TurnEngine({ provider, registry, permissions, model: "your-model", instructions: "..." });
  */
+
+import { DEFAULT_MAX_ITERATIONS } from "./engine/limits.js";
 
 // ===================== 核心引擎 =====================
 
@@ -49,6 +51,19 @@ export type {
   ToolSchema,
   ReasoningEffort,
 } from "./engine/types.js";
+export {
+  ATTACHMENT_DIR,
+  AttachmentError,
+  MAX_ATTACHMENTS,
+  MAX_ATTACHMENT_BYTES,
+  attachmentBytes,
+  hasNonImageAttachments,
+  normalizeAttachments,
+  readStoredAttachment,
+  saveAttachments,
+  stripAttachments,
+} from "./engine/attachments.js";
+export type { MessageAttachment, StoredAttachment } from "./engine/attachments.js";
 
 // ===================== LLM Provider =====================
 
@@ -63,7 +78,35 @@ export type { ToolSpec, ToolMetadata } from "./tools/ToolRegistry.js";
 // ===================== 权限引擎 =====================
 
 export { PermissionEngine, Mode } from "./permissions/PermissionEngine.js";
-export type { Decision } from "./permissions/PermissionEngine.js";
+export type {
+  Decision,
+  ShellPolicy,
+  ShellSandboxStatus,
+} from "./permissions/PermissionEngine.js";
+export { assessCommand } from "./permissions/workspaceGuard.js";
+export type { ConfinementResult } from "./permissions/workspaceGuard.js";
+export {
+  loadPermissionConfig,
+  DEFAULT_ALLOWED_COMMANDS,
+} from "./permissions/config.js";
+export type { PermissionConfig } from "./permissions/config.js";
+
+// ===================== Shell 沙箱 =====================
+
+export {
+  resolveSandbox,
+  wrapWithSandbox,
+  describeSandbox,
+  buildMacProfile,
+  buildBwrapArgs,
+  resetSandboxCache,
+} from "./tools/sandbox.js";
+export type {
+  SandboxPlan,
+  SandboxBackend,
+  SandboxMode,
+  SandboxOptions,
+} from "./tools/sandbox.js";
 
 // ===================== 内置钩子 =====================
 
@@ -92,6 +135,8 @@ export {
   CODE_INSTRUCTIONS,
   COWORK_INSTRUCTIONS,
   EXPLORER_INSTRUCTIONS,
+  MCP_GUIDANCE,
+  OCR_GUIDANCE,
   PLAN_MODE_CONTEXT,
   DISCUSS_MODE_CONTEXT,
 } from "./prompts/index.js";
@@ -104,15 +149,75 @@ export type { AgentDef } from "./agents/AgentRegistry.js";
 // ===================== MCP =====================
 
 export { McpClient, mcpToolKey, sanitizeToolName } from "./mcp/McpClient.js";
-export type { McpServerConfig, McpToolInfo } from "./mcp/McpClient.js";
-export { McpManager } from "./mcp/McpManager.js";
-export type { McpConnectResult } from "./mcp/McpManager.js";
+export type {
+  McpClientOptions,
+  McpServerConfig,
+  McpToolInfo,
+  McpTransportType,
+} from "./mcp/McpClient.js";
+export {
+  McpManager,
+  MCP_CALL_TOOL,
+  MCP_SEARCH_TOOL,
+} from "./mcp/McpManager.js";
+export type {
+  McpConnectResult,
+  McpLazyOptions,
+  McpManagerOptions,
+} from "./mcp/McpManager.js";
+export {
+  BUILTIN_MCP_CONFIGS,
+  defaultMcpConfigPath,
+  loadMcpConfigFile,
+  normalizeMcpConfig,
+  normalizeMcpConfigs,
+  readMcpConfigFile,
+  saveMcpConfigFile,
+  splitCommandLine,
+  withBuiltinMcpConfigs,
+} from "./mcp/config.js";
+export type {
+  McpConfigNormalizeOptions,
+  McpConfigNormalizeResult,
+} from "./mcp/config.js";
+export type {
+  McpBuiltinContext,
+  OcrLlmConfig,
+  OcrRuntimeOverrides,
+} from "./mcp/builtin/types.js";
 
 // ===================== 内置工具注册函数 =====================
 
 export { registerFileTools } from "./tools/files.js";
 export { registerReadOnlyFileTools } from "./tools/files.js";
+export { ConflictGuard, contentDigest } from "./tools/conflictGuard.js";
+export type { WriteConflict } from "./tools/conflictGuard.js";
+
+// ===================== 变更追踪 =====================
+
+export {
+  resolveVcsPlan,
+  isGitRepo,
+  agentRef,
+  sessionIndexPath,
+  SHADOW_DIR,
+  SessionVcs,
+  VcsHook,
+  runGit,
+  gitOk,
+  gitMessage,
+} from "./vcs/index.js";
+export type {
+  VcsMode,
+  VcsConfigMode,
+  VcsPlan,
+  TurnCommit,
+  RestoreResult,
+  ResolveVcsOptions,
+  GitResult,
+} from "./vcs/index.js";
 export { registerShellTool } from "./tools/shell.js";
+export { getShellCwd } from "./tools/shell.js";
 export { registerSearchTool } from "./tools/search.js";
 export { registerWebTools } from "./tools/web.js";
 export { registerGitTools } from "./tools/git.js";
@@ -142,6 +247,9 @@ export type { DirectoryHandler } from "./tools/directories.js";
 import type { TurnEngineOpts } from "./engine/TurnEngine.js";
 import type { EngineHook, Approver } from "./engine/events.js";
 import { TurnEngine } from "./engine/TurnEngine.js";
+import { CompositeHook } from "./engine/CompositeHook.js";
+import { SessionVcs, VcsHook, resolveVcsPlan } from "./vcs/index.js";
+import type { VcsConfigMode } from "./vcs/plan.js";
 import type { ProviderClient } from "./providers/OpenAIProvider.js";
 import { OpenAIProvider } from "./providers/OpenAIProvider.js";
 import { ToolRegistry } from "./tools/ToolRegistry.js";
@@ -153,7 +261,13 @@ import {
 } from "./prompts/index.js";
 import type { Message, ReasoningEffort } from "./engine/types.js";
 import { registerFileTools } from "./tools/files.js";
-import { registerShellTool } from "./tools/shell.js";
+import { ConflictGuard } from "./tools/conflictGuard.js";
+import type {
+  ShellPolicy,
+} from "./permissions/PermissionEngine.js";
+import type { SandboxOptions } from "./tools/sandbox.js";
+import { resolveSandbox } from "./tools/sandbox.js";
+import { getShellCwd, registerShellTool } from "./tools/shell.js";
 import { registerSearchTool } from "./tools/search.js";
 import { registerWebTools } from "./tools/web.js";
 import { registerGitTools } from "./tools/git.js";
@@ -169,13 +283,19 @@ import { registerDirectoryTool } from "./tools/directories.js";
 export interface CreateEngineOpts {
   /** 工作区根目录 */
   workspace: string;
-  /** 模型标识（默认取环境变量 OPENAI_MODEL，否则 gpt-4o） */
+  /**
+   * 模型标识（缺省取环境变量 OPENAI_MODEL）。
+   *
+   * 都没有时留空，**不会**兜底成某个厂商的具体型号：早先写死 `gpt-4o`，
+   * 用户既没配供应商也没这个型号的 Key，第一轮请求必然失败，还让人以为
+   * 系统已经替他选好了。空模型在 `TurnEngine.run()` 处给出明确报错。
+   */
   model?: string;
   /** LLM Provider（缺省时自动创建 OpenAIProvider） */
   provider?: ProviderClient;
   /** 运行模式（默认 INTERACTIVE） */
   mode?: Mode;
-  /** 单轮最大迭代次数（默认 300） */
+  /** 单轮最大迭代次数（缺省用 DEFAULT_MAX_ITERATIONS） */
   maxIterations?: number;
   /**
    * 推理强度（可选）。缺省时取环境变量 OPENAI_REASONING_EFFORT
@@ -185,6 +305,24 @@ export interface CreateEngineOpts {
   reasoningEffort?: ReasoningEffort;
   /** 命令白名单（Auto 模式下自动放行的命令前缀，默认空数组） */
   allowedCommands?: string[];
+  /**
+   * shell 免审策略（默认 approve，保持既有语义）。
+   * workspace / sandbox 需配合 `sandbox` 使用：沙箱生效时工作区内的
+   * 命令不再逐条审批；沙箱不可用时 workspace 退化为路径判定。
+   */
+  shellPolicy?: ShellPolicy;
+  /** OS 级沙箱配置（默认 auto：探测到 sandbox-exec / bwrap 就启用） */
+  sandbox?: SandboxOptions;
+  /**
+   * 变更追踪（默认 **off**，不改变既有行为）。
+   * 启用后每轮结束记一个快照；多会话共享工作区时用它审计与回滚。
+   * CLI 与 server 各自装配（要按会话区分 ref），这里供嵌入式调用方显式开启。
+   */
+  vcs?: {
+    mode?: VcsConfigMode;
+    /** 快照的会话标识（决定 refs/agent/<id>）；缺省为 "default" */
+    sessionId?: string;
+  };
   /** 系统提示词（缺省时使用 buildInstructions("code", ...) 生成） */
   instructions?: string;
   /** 代理类型：code=编程助手 / cowork=通用协作（影响默认 instructions） */
@@ -234,12 +372,15 @@ export interface CreateEngineOpts {
 export function createDefaultEngine(opts: CreateEngineOpts): TurnEngine {
   const {
     workspace,
-    model = process.env.OPENAI_MODEL ?? "gpt-4o",
+    model = process.env.OPENAI_MODEL ?? "",
     provider,
     mode = Mode.INTERACTIVE,
-    maxIterations = 300,
+    maxIterations = DEFAULT_MAX_ITERATIONS,
     reasoningEffort,
     allowedCommands = [],
+    shellPolicy = "approve",
+    sandbox,
+    vcs,
     instructions,
     agentType = "code",
     messages,
@@ -265,13 +406,18 @@ export function createDefaultEngine(opts: CreateEngineOpts): TurnEngine {
   const effectiveProvider = provider ?? new OpenAIProvider({ logDir });
 
   // 2. 工具注册表
+  // 沙箱先解析：run_shell 的执行路径与权限判定都要用到同一份方案
+  const sandboxPlan = resolveSandbox({ ...sandbox, workspace });
   const registry = new ToolRegistry();
-  registerFileTools(registry, workspace);
-  registerShellTool(registry, workspace);
+  // 每个引擎（会话）一个冲突检测器：记住本会话读过什么，
+  // 写入前发现磁盘内容已变（别的会话改过）就拒绝覆盖
+  const conflictGuard = new ConflictGuard();
+  registerFileTools(registry, workspace, conflictGuard);
+  registerShellTool(registry, workspace, undefined, sandboxPlan);
   registerSearchTool(registry, workspace);
   registerWebTools(registry);
   registerGitTools(registry, workspace);
-  registerDiffTools(registry, workspace);
+  registerDiffTools(registry, workspace, conflictGuard);
   registerAskTool(registry);
   registerPlanTool(registry);
   registerDirectoryTool(registry);
@@ -293,6 +439,13 @@ export function createDefaultEngine(opts: CreateEngineOpts): TurnEngine {
     workspaceRoot: workspace,
     mode,
     allowedCommands,
+    shellPolicy,
+    sandbox: {
+      enforced: sandboxPlan.enforced,
+      backend: sandboxPlan.backend,
+      reason: sandboxPlan.reason,
+    },
+    shellCwd: () => getShellCwd(workspace),
   });
 
   // 4. 系统提示词
@@ -301,6 +454,17 @@ export function createDefaultEngine(opts: CreateEngineOpts): TurnEngine {
     instructions ?? buildInstructions(agentType, workspace, today);
 
   // 5. 组装引擎
+  // 变更追踪：默认关闭；显式配置时把 VcsHook 并联进调用方的 hook，
+  // 不覆盖调用方自己的生命周期回调
+  let effectiveHook = hook;
+  const vcsMode = vcs?.mode ?? "off";
+  if (vcsMode !== "off") {
+    const vcsHook = new VcsHook(
+      new SessionVcs(resolveVcsPlan(workspace, { mode: vcsMode }), vcs?.sessionId ?? "default"),
+    );
+    effectiveHook = hook ? new CompositeHook([hook, vcsHook]) : vcsHook;
+  }
+
   const engine = new TurnEngine({
     provider: effectiveProvider,
     registry,
@@ -311,7 +475,7 @@ export function createDefaultEngine(opts: CreateEngineOpts): TurnEngine {
     maxIterations,
     reasoningEffort: effectiveEffort,
     messages,
-    hook,
+    hook: effectiveHook,
     contextWindow,
     thresholdPct,
     softThresholdPct,

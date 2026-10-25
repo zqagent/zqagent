@@ -18,17 +18,35 @@ import type { NotificationChannelConfig, TenantConfig } from "./types.js";
 import { SecretBox } from "../crypto/secrets.js";
 import { FleetNodeBridge } from "./fleet/FleetNodeBridge.js";
 import { ensureNodeId } from "./projects.js";
-import { resolveFleetConfig, type FleetController, type FleetStatusView } from "./fleet-config.js";
+import {
+  resolveFleetConfig,
+  type FleetController,
+  type FleetEnrollInput,
+  type FleetRenameResult,
+  type FleetStatusView,
+} from "./fleet-config.js";
 import { DEFAULT_DATA_DIR } from "../paths.js";
+import { defaultNodeLabel } from "../node-name.js";
 import {
   createNotificationHub,
   decryptNotifications,
   saveNotifications,
 } from "./notify/index.js";
 import { QqManager, QqBindingsStore, PairingCodeStore } from "./qq/index.js";
-import { hubEnrollByCode } from "@zqagent/shared/hub-api";
+import {
+  hubEnrollByAccount,
+  hubEnrollByCode,
+  hubEnrollByToken,
+  hubUpdateNodeLabelSelf,
+} from "@zqagent/shared/hub-api";
 import type { FleetCredential } from "@zqagent/shared/fleet";
 import { UpdateController } from "../update/controller.js";
+import {
+  scheduleBuiltinProvider,
+  adoptBuiltinModelForTenants,
+  dropLegacyDefaultModels,
+} from "./builtinLlm.js";
+import { defaultTenantModel, nodeDefaultProvider } from "./nodeLlm.js";
 
 function env(key: string): string | undefined {
   return process.env[key];
@@ -60,7 +78,9 @@ function seedDemoTenant(store: Store): TenantConfig | null {
     // 未显式指定时随机生成：固定默认密钥一旦随 HOST=0.0.0.0 暴露到公网，等于公开凭据。
     // 只在首次创建时生成并落盘，后续启动沿用磁盘上的值（启动日志会打印完整密钥）。
     apiKey: env("TENANT_API_KEY") ?? generateApiKey(),
-    model: env("MODEL") ?? env("OPENAI_MODEL") ?? "deepseek-v4-flash",
+    // 不再硬编码具体厂商型号：志前 API 只认 deepseek-flash，写死 deepseek-v4-flash
+    // 会让新装节点的第一次请求 404。默认值统一走 defaultTenantModel（见 nodeLlm.ts）。
+    model: defaultTenantModel(store),
     provider: {
       apiKey: env("OPENAI_API_KEY"),
       baseURL: env("OPENAI_BASE_URL"),
@@ -175,10 +195,10 @@ export interface StartServerOptions {
   /** 监听地址（默认 env HOST ?? 127.0.0.1） */
   host?: string;
   /**
-   * 启动时自动接入（凭一次性注册码）。仅当本地尚未接入（fleet.json 不存在）时生效；
+   * 启动时自动接入（一次性注册码或 Hub 账号）。仅当本地尚未接入（fleet.json 不存在）时生效；
    * enroll 失败只告警、不阻塞启动。
    */
-  autoEnroll?: { hubUrl: string; code: string; label?: string } | null;
+  autoEnroll?: FleetEnrollInput | null;
   /**
    * 启用自动更新（默认关闭；`zqagent serve` 与 `src/server/index.ts` 显式开启）。
    * 仅当「SEA 单文件 + 服务管理器托管 + 配置了验签公钥」时才会真正生效。
@@ -291,6 +311,14 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
   const store = new Store(dataDir);
   const demo = seedDemoTenant(store);
   syncTenantModels(store);
+  // 老节点升级：内置项可能早已落盘，但演示租户的型号还停在旧默认值
+  //（deepseek-v4-flash）。这里先无条件迁移一次——不依赖 Hub 是否可达，
+  // 否则离线节点永远修不好。内置项后续刷新时会再对齐一次。
+  const nodeModel = nodeDefaultProvider(store)?.model;
+  if (nodeModel) adoptBuiltinModelForTenants(store, nodeModel);
+  // 没有可迁移的型号（离线且未配任何供应商）：至少别让旧版写进去的
+  // gpt-4o / deepseek-v4-flash 继续冒充「系统默认模型」
+  else dropLegacyDefaultModels(store);
   const usageLedger = new UsageLedger(dataDir);
   usageLedger.init();
   const manager = new SessionManager(store, undefined, { usage: usageLedger });
@@ -332,6 +360,11 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
   // ===================== 云端接入（WSS 直连 Rust 网关；可运行时热接入） =====================
   let fleet: FleetNodeBridge | null = null;
   let fleetCred: FleetCredential | null = null;
+  /**
+   * 自更新控制器。**始终创建**（`self_update` 指令与 UI 的手动更新要用），
+   * 只有 `opts.autoUpdate` 时才启动定时调度。
+   */
+  let updater: UpdateController | null = null;
 
   function connectFleet(cred: FleetCredential): void {
     // 采用凭据中的 nodeId（控制面纳管标识）：新接入节点的本地 node.json 可能尚未生成，
@@ -353,6 +386,8 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
       deps: {
         store,
         manager,
+        // 闭包推迟求值：桥先于 UpdateController 创建，指令到达时 updater 已就绪
+        getUpdater: () => updater,
         applyFleetCred: async (cred) => {
           store.saveFleetCredential(cred);
           // 延后重连：先让当前 ack 回执发出（旧连接仍在用），再切换连接
@@ -371,7 +406,7 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
       hubUrl: fleetCred?.hubUrl,
       gatewayUrl: fleetCred?.gatewayUrl ?? env("FLEET_GATEWAY_URL"),
       online: fleet?.isConnected() ?? false,
-      label: fleetCred?.label,
+      label: fleetCred?.label ?? store.loadNodeLabel() ?? undefined,
       lastError: fleet?.getLastError() ?? undefined,
       reconnectCount: fleet?.getErrorCount() ?? 0,
     };
@@ -381,19 +416,59 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
     status: fleetStatus,
     async enroll(input) {
       const nodeId = ensureNodeId(store);
-      const cred = await hubEnrollByCode(input.hubUrl, {
-        code: input.code,
-        nodeId,
-        label: input.label,
-      });
+      // 未显式指定名称时取主机名：Hub 界面显示可读的机器名，而不是 nodeId
+      const label = input.label?.trim() || defaultNodeLabel();
+      const cred = input.hubToken
+        ? await hubEnrollByToken(input.hubUrl, input.hubToken, { nodeId, label })
+        : input.account
+          ? await hubEnrollByAccount(input.hubUrl, {
+              email: input.account.email,
+              phone: input.account.phone,
+              password: input.account.password,
+              code: input.account.smsCode,
+              nodeId,
+              label,
+            })
+          : await hubEnrollByCode(input.hubUrl, {
+              code: input.code!,
+              nodeId,
+              label,
+            });
       const full: FleetCredential = {
         ...cred,
-        label: input.label ?? cred.label,
+        label,
         enrolledAt: new Date().toISOString(),
       };
       store.saveFleetCredential(full);
+      // 上报的 label 取自 node.json：与 Hub 记录同源，控制台各视图才不会显示两套名字
+      store.saveNodeLabel(label);
       connectFleet(full);
       return fleetStatus();
+    },
+    async rename(label): Promise<FleetRenameResult> {
+      const name = label.trim();
+      store.saveNodeLabel(name);
+      if (fleetCred) {
+        fleetCred = { ...fleetCred, label: name };
+        store.saveFleetCredential(fleetCred);
+      }
+      fleet?.republishLabel();
+      // Hub 界面读的是控制面里的 node.label，不写它就只是本地改名
+      let hubSynced = false;
+      let hubError: string | undefined;
+      const cred = fleetCred;
+      if (cred?.hubUrl && cred.fleetToken) {
+        try {
+          await hubUpdateNodeLabelSelf(cred.hubUrl, cred.fleetToken, {
+            nodeId: ensureNodeId(store),
+            label: name,
+          });
+          hubSynced = true;
+        } catch (e) {
+          hubError = e instanceof Error ? e.message : String(e);
+        }
+      }
+      return { ...fleetStatus(), hubSynced, hubError };
     },
     unlink() {
       fleet?.close();
@@ -420,9 +495,20 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
     // 首次启动带注册码：异步接入，不阻塞监听
     void fleetController
       .enroll(opts.autoEnroll)
-      .then((st) => console.log(`[fleet] 已自动接入，节点 ${st.nodeId}（${st.gatewayUrl}）`))
+      .then((st) => {
+        console.log(`[fleet] 已自动接入，节点 ${st.nodeId}（${st.gatewayUrl}）`);
+        // 接入后立刻补配内置模型（接入响应里已带快照，这里只是兜底落盘）
+        scheduleBuiltinProvider(store, (m) => console.log(m));
+      })
       .catch((e) => console.warn(`[fleet] 自动接入失败（可稍后 /link 重试）: ${e instanceof Error ? e.message : e}`));
   }
+
+  /*
+   * 平台内置大模型补配：已接入 Hub 但本地没有内置项的节点（升级上来的老节点）
+   * 在这里自动补一次。异步、失败静默——未登录的用户本来就「没有内置模型」，
+   * 自己配其它模型即可，不能因此影响启动。
+   */
+  if (initialCred) scheduleBuiltinProvider(store, (m) => console.log(m));
 
   // ===================== QQ 官方机器人（可选，支持热配置） =====================
   const pairingCodes = new PairingCodeStore();
@@ -491,6 +577,14 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
     }
   });
 
+  // 自更新控制器：**始终创建**（远端 `self_update` 指令与 UI 手动更新要用），
+  // 只有 `opts.autoUpdate` 时才启动后台调度（见监听成功处）。
+  updater = new UpdateController({
+    dataDir,
+    isIdle: () => manager.isIdle(),
+    prepareExit: closeServer,
+  });
+
   const server = createApp(store, manager, {
     secretBox,
     notificationHub,
@@ -498,6 +592,7 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
     adminKey,
     fleet: fleetController,
     host,
+    updater,
   });
 
   /**
@@ -506,7 +601,6 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
    * 由调用方决定何时退出；信号路径见下面的 shutdown()。
    */
   let closed = false;
-  let updater: UpdateController | null = null;
   function closeServer(): void {
     if (closed) return;
     closed = true;
@@ -553,14 +647,8 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
   // 自动更新：静默下载，空闲时替换自身并退出（由 systemd/launchd 拉起新版本）。
-  // 默认关闭，避免嵌入方/测试意外触发；`serve` 与 server 入口显式开启。
-  if (opts.autoUpdate) {
-    updater = new UpdateController({
-      dataDir,
-      isIdle: () => manager.isIdle(),
-      prepareExit: closeServer,
-    });
-  }
+  // 控制器已在上面创建（远端 self_update / 手动更新共用）；这里只决定是否启动调度，
+  // 避免嵌入方/测试意外触发后台下载。
 
   // SSE 长连接不应被服务器空闲超时断开
   server.timeout = 0;
@@ -584,7 +672,7 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
         printReady(info, qq);
       }
       // 监听成功后再启动更新调度，避免端口占用失败时留下定时器
-      updater?.start();
+      if (opts.autoUpdate) updater?.start();
       resolve(info);
     }, reject);
   });

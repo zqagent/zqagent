@@ -29,6 +29,12 @@ export interface SavedState {
   nameSource?: "auto" | "user";
   /** 已成功完成的任务数（用于第 1/3/5 次自动命名） */
   taskCount?: number;
+  /** 权限模式（恢复会话时还原，避免重启后回到逐条审批） */
+  permissionMode?: string;
+  /** 会话级「总是允许此工具」 */
+  allowTools?: string[];
+  /** 会话级「总是允许此命令」（按可执行程序名记录） */
+  allowCommands?: string[];
 }
 
 /** 会话命名相关的元数据（由 CLI 维护，随 state 快照持久化） */
@@ -129,6 +135,16 @@ export class FileLogHook implements EngineHook {
 
   /** 保存完整引擎状态快照（检查点） */
   saveState(engine: TurnEngine, meta?: SessionNameMeta): void {
+    // 权限状态随快照落盘：/mode、/agent 重建引擎与重启恢复都不能丢掉
+    // 用户已经做过的授权，否则同一批命令会被反复审批。
+    // 用可选访问兼容只提供 model/messages 的轻量 stub。
+    const permissions = engine.permissions as
+      | {
+          mode?: string;
+          sessionAllowTools?: Set<string>;
+          sessionAllowCommands?: Set<string>;
+        }
+      | undefined;
     const state: SavedState = {
       sessionId: this.sessionId,
       model: engine.model,
@@ -146,6 +162,15 @@ export class FileLogHook implements EngineHook {
           }
         : null,
       savedAt: new Date().toISOString(),
+      ...(permissions?.mode !== undefined
+        ? { permissionMode: permissions.mode }
+        : {}),
+      ...(permissions?.sessionAllowTools
+        ? { allowTools: [...permissions.sessionAllowTools] }
+        : {}),
+      ...(permissions?.sessionAllowCommands
+        ? { allowCommands: [...permissions.sessionAllowCommands] }
+        : {}),
       // 会话命名元数据（可选，向后兼容旧调用）
       ...(meta?.name !== undefined ? { name: meta.name } : {}),
       ...(meta?.nameSource !== undefined

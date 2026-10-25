@@ -6,6 +6,15 @@
  */
 
 /**
+ * 单轮最大迭代次数的缺省值。
+ *
+ * 未显式传入 maxIterations、且环境变量 MAX_ITERATIONS 未设置（或非法）时使用。
+ * 各装配入口（TurnEngine / createDefaultEngine / CLI / Server 会话）统一引用此常量，
+ * 避免默认值在多处硬编码后失去同步。
+ */
+export const DEFAULT_MAX_ITERATIONS = 800;
+
+/**
  * 解析最大迭代次数：非法 / 非正数 / 空值 → fallback；否则向下取整。
  * @param value 环境变量原始字符串（可能 undefined）
  * @param fallback 缺省值

@@ -55,6 +55,35 @@ const DISPLAY_PLATFORM = { darwin: "macos", win32: "windows", linux: "linux" };
 
 const SEA_FUSE = "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2";
 
+/**
+ * 产物文件名统一带版本号与构建时间：
+ *   zqagent-<platform>-<arch>[-glibc217]-v<version>-<yyyymmdd>-<HHmmss>[.exe]
+ *
+ * 目的：同名文件在不同版本之间互相覆盖、无法从文件名判断新旧。
+ * `ZQ_BUILD_DATE` 可覆盖（复现某次发布、或让同一批产物共用同一个时间戳）；
+ * 只给 8 位日期时按 00:00:00 补齐。
+ */
+function buildStamp() {
+  return normalizeBuildStamp(process.env.ZQ_BUILD_DATE);
+}
+
+/** 任意写法（`2026-10-19 21:57:32` / `20261019-215732`）→ `20261019-215732` */
+function normalizeBuildStamp(raw) {
+  const digits = (raw?.trim() || new Date().toISOString()).replace(/\D/g, "").slice(0, 14);
+  const date = digits.slice(0, 8);
+  const time = digits.slice(8, 14).padEnd(6, "0");
+  return `${date}-${time}`;
+}
+
+/** 当前包版本（构建期写进文件名，不做任何网络/清单查询） */
+function packageVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
+  } catch {
+    return "0.0.0";
+  }
+}
+
 function fail(message) {
   console.error(`\n✗ ${message}\n`);
   process.exit(1);
@@ -64,12 +93,20 @@ function log(...args) {
   console.log(`[sea] ${args.join(" ")}`);
 }
 
+/** shell 模式下整条命令被拼成字符串交给 cmd，含空格的路径必须加引号 */
+function quoteIfNeeded(token) {
+  return /\s/.test(token) && !/^".*"$/.test(token) ? `"${token}"` : token;
+}
+
 function run(cmd, args, opts = {}) {
-  const result = spawnSync(cmd, args, {
+  // Windows 上 npm / tsup 是 .cmd 包装脚本，必须经 shell 才能执行；
+  // 但 shell 下 "C:\Program Files\nodejs\node.exe" 会在空格处被 cmd 截断。
+  const useShell = opts.shell ?? process.platform === "win32";
+  const fix = (t) => (useShell ? quoteIfNeeded(t) : t);
+  const result = spawnSync(fix(cmd), useShell ? args.map(fix) : args, {
     stdio: "inherit",
     cwd: ROOT,
-    // Windows 上 npm / tsup 是 .cmd 包装脚本，必须经 shell 才能执行
-    shell: process.platform === "win32",
+    shell: useShell,
     ...opts,
   });
   if (result.error) fail(`无法执行 ${cmd}：${result.error.message}`);
@@ -265,7 +302,8 @@ async function main() {
       ROOT,
       "release",
       "cli",
-      `zqagent-${DISPLAY_PLATFORM[opts.platform]}-${opts.arch}${libcSuffix}${opts.platform === "win32" ? ".exe" : ""}`,
+      `zqagent-${DISPLAY_PLATFORM[opts.platform]}-${opts.arch}${libcSuffix}` +
+        `-v${packageVersion()}-${buildStamp()}${opts.platform === "win32" ? ".exe" : ""}`,
     );
 
   if (opts.skipBuild) {

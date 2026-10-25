@@ -33,9 +33,11 @@ plus a variable-length payload:
 | `len` | Payload length in bytes (varint, u32). **The upper bound must be validated before decoding** |
 | `payload` | Protobuf-encoded message body (interpreted according to `type`) |
 
-**Limit**: `len` must not exceed `MAX_FRAME_BYTES = 4 MiB` (the node-side reporting limit is
-currently about 3.5 MB, `FleetNodeBridge.ts:53,992-996`). Anything above the limit is an error
-and the connection is closed, preventing memory amplification attacks.
+**Limit**: `len` must not exceed `MAX_FRAME_BYTES = 16 MiB`. The larger bound is reserved for
+chat attachments (up to 10 MB of raw files per message, ~13.4 MB after base64). Node-side
+reporting still follows its own business limits (currently about 3.5 MB,
+`FleetNodeBridge.ts:53,992-996`). Anything above the limit is an error and the connection is
+closed, preventing memory amplification attacks.
 
 **Decoding order**: `magic` → `ver` → `type` validity → `len` bound → `len` matches the
 remaining byte count. Failure at any step is an error (partial parsing must never be used).

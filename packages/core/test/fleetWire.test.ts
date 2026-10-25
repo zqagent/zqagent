@@ -23,9 +23,11 @@ import {
   type Envelope,
 } from "@zqagent/shared/wire";
 import {
+  ACK_JSON_MAX_BYTES,
   encodeCmdFrame,
   encodeOutbound,
   fromWireCommand,
+  guardAckSize,
   isoToMs,
   toWireAck,
   toWireEvent,
@@ -288,5 +290,64 @@ describe("节点侧 wire 适配层", () => {
     const frame = encodeCmdFrame(env);
     frameOf(FrameType.CMD, frame);
     expect(decodeFrame(frame).payload).toEqual(encodeEnvelope(env));
+  });
+
+  describe("guardAckSize：回执收进单帧", () => {
+    /** 造一条指定 data 大小的回执（base64 是纯 ASCII，长度即可控） */
+    const ackWith = (base64Len: number) => ({
+      reqId: "r1",
+      type: "zip_download",
+      ok: true,
+      data: { base64: "A".repeat(base64Len) },
+    });
+
+    it("小回执原样返回（不降级）", () => {
+      const ack = ackWith(1024);
+      expect(guardAckSize(ack, JSON.stringify(ack))).toBe(ack);
+    });
+
+    it("超过单帧上限时降级为错误回执，并说明实际大小", () => {
+      const ack = ackWith(ACK_JSON_MAX_BYTES + 1024);
+      const out = guardAckSize(ack, JSON.stringify(ack));
+      expect(out.ok).toBe(false);
+      expect(out.reqId).toBe("r1");
+      expect(out.type).toBe("zip_download");
+      expect(out.data).toBeUndefined();
+      expect(out.error).toMatch(/结果过大/);
+      expect(out.error).toMatch(/单帧传输上限/);
+    });
+
+    it("降级后的回执本身能编码成帧（不再触发超限）", () => {
+      const ack = ackWith(ACK_JSON_MAX_BYTES * 2);
+      const out = guardAckSize(ack, JSON.stringify(ack));
+      const frame = encodeOutbound({ kind: "ack", clientId: "c1", ack: out }, NODE);
+      expect(frame).not.toBeNull();
+      expect(decodeFrame(frame!).type).toBe(FrameType.ACK);
+      expect(decodeAck(decodeFrame(frame!).payload).ok).toBe(false);
+    });
+
+    it("失败回执不测量大小（本身很小，省一次扫描）", () => {
+      const fail = { reqId: "r2", type: "zip_download", ok: false, error: "boom" };
+      // 传入的不是真实序列化结果：若函数去量字节数会拿到 NaN 而误判
+      expect(guardAckSize(fail, "")).toBe(fail);
+    });
+
+    it("边界：恰好等于上限时保留原回执", () => {
+      // 用**与 ack 相同形状**的空壳算包装开销：type/reqId 长度会影响结果，
+      // 拿一个字段不同的对象来算会差出十几字节
+      const overhead = JSON.stringify(ackWith(0)).length;
+      const ack = ackWith(ACK_JSON_MAX_BYTES - overhead);
+      const json = JSON.stringify(ack);
+      expect(Buffer.byteLength(json, "utf8")).toBe(ACK_JSON_MAX_BYTES);
+      expect(guardAckSize(ack, json)).toBe(ack);
+    });
+
+    it("中文按 UTF-8 字节数判断（字符数不等于字节数）", () => {
+      // 字符数只有上限的 1/3，但每个汉字 3 字节 → 实际超限
+      const chars = Math.floor(ACK_JSON_MAX_BYTES / 3) + 1024;
+      const ack = { reqId: "r4", type: "x", ok: true, data: { text: "中".repeat(chars) } };
+      expect(JSON.stringify(ack).length).toBeLessThan(ACK_JSON_MAX_BYTES);
+      expect(guardAckSize(ack, JSON.stringify(ack)).ok).toBe(false);
+    });
   });
 });

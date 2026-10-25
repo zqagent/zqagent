@@ -45,6 +45,31 @@ export interface UpdaterStatus {
   lastError?: string;
 }
 
+/** 版本检查结果（`self_update --action check` 用；不下载、不写状态） */
+export interface UpdateInspect {
+  currentVersion: string;
+  channel: string;
+  manifestUrl: string;
+  /** 清单里是否有比当前更新的版本 */
+  updateAvailable: boolean;
+  /** 清单里的最新版本（拉不到清单时缺省） */
+  latestVersion?: string;
+  notes?: string;
+  /** 不可更新的原因（已是最新 / 未启用 / 需手动升级…） */
+  reason?: string;
+  /** 低于清单要求的最低版本时给出该下限 */
+  manualUpgradeRequired?: string;
+}
+
+/** 远端触发安装的回执（ack 先回，安装本身在后台跑） */
+export interface UpdateInstallStart {
+  /** 是否已受理（false 表示无需更新或不可更新） */
+  accepted: boolean;
+  fromVersion: string;
+  toVersion?: string;
+  message: string;
+}
+
 /**
  * 读取更新配置：进程环境优先，缺失时回落到 systemd unit 注入的变量。
  *
@@ -76,6 +101,43 @@ function nextIntervalMs(): number {
   const base = num("ZQAGENT_UPDATE_INTERVAL_MS", 6 * 60 * 60 * 1000);
   const jitter = base * 0.15 * (Math.random() * 2 - 1);
   return Math.max(60_000, Math.round(base + jitter));
+}
+
+/**
+ * 清单 → 检查结论（纯函数，便于单测）。
+ *
+ * 只有「清单版本更高、且当前版本满足 minimumVersion」才算可更新；
+ * 其余情况都要给出 `reason`，让远端 UI 能直接展示原因而不是靠猜。
+ */
+export function evaluateManifest(
+  base: { currentVersion: string; channel: string; manifestUrl: string },
+  manifest: { version: string; minimumVersion?: string; notes?: string },
+): UpdateInspect {
+  if (!parseVersion(base.currentVersion) ||
+      compareVersions(manifest.version, base.currentVersion) <= 0) {
+    return {
+      ...base,
+      updateAvailable: false,
+      latestVersion: manifest.version,
+      reason: `已是最新版本（v${base.currentVersion}）`,
+    };
+  }
+  if (manifest.minimumVersion &&
+      compareVersions(base.currentVersion, manifest.minimumVersion) < 0) {
+    return {
+      ...base,
+      updateAvailable: false,
+      latestVersion: manifest.version,
+      manualUpgradeRequired: manifest.minimumVersion,
+      reason: `当前版本过低，需手动升级到 >= ${manifest.minimumVersion}`,
+    };
+  }
+  return {
+    ...base,
+    updateAvailable: true,
+    latestVersion: manifest.version,
+    ...(manifest.notes ? { notes: manifest.notes } : {}),
+  };
 }
 
 export class UpdateController {
@@ -181,6 +243,86 @@ export class UpdateController {
       this.log(`检查更新失败：${(err as Error).message}`);
     }
     this.schedule(nextIntervalMs());
+  }
+
+  /**
+   * 只读检查：拉清单比对版本，不下载、不改 state。
+   *
+   * 供远端 `self_update --action check` 与 UI 展示用；与定时器 `check()` 不同，
+   * 这里不加 `checking` 锁、不写 `lastCheckAt`，因此不会干扰自动更新流程。
+   */
+  async inspect(): Promise<UpdateInspect> {
+    const base = {
+      currentVersion: this.currentVersion,
+      channel: updaterChannel(),
+      manifestUrl: this.manifestUrl(),
+    };
+    const key = this.publicKey;
+    const cap = selfUpdateCapability(Boolean(key));
+    if (!cap.ok) {
+      return { ...base, updateAvailable: false, reason: `自更新不可用：${cap.reason}` };
+    }
+    const res = await fetchManifest(base.manifestUrl, key!, {
+      allowInsecureUrl: env("ZQAGENT_UPDATE_INSECURE") === "1",
+    });
+    if (!res.manifest) {
+      return {
+        ...base,
+        updateAvailable: false,
+        reason: `更新检查失败：${res.error ?? "清单校验失败"}`,
+      };
+    }
+    return evaluateManifest(base, res.manifest);
+  }
+
+  /**
+   * 远端触发安装：先同步给出结论（受理/无需更新），安装本身在后台跑。
+   *
+   * 必须「先回执、后安装」：安装成功后进程会 `exit(70)` 交给 systemd 拉起新版本，
+   * 如果等到安装完成再回执，回执永远发不出去（表现为网关超时）。
+   *
+   * 复用定时器同一条 `check()` 路径：验签、下载、自检、失败计数、安装后自检与
+   * 回滚保护全都一致，只是把 `installMode` 设为 `force` 时不等待空闲。
+   */
+  async requestInstall(force = false): Promise<UpdateInstallStart> {
+    const fromVersion = this.currentVersion;
+    const cap = selfUpdateCapability(Boolean(this.publicKey));
+    if (!cap.ok) {
+      return { accepted: false, fromVersion, message: `自更新不可用：${cap.reason}` };
+    }
+
+    const info = await this.inspect();
+    if (!info.updateAvailable) {
+      return {
+        accepted: false,
+        fromVersion,
+        ...(info.latestVersion ? { toVersion: info.latestVersion } : {}),
+        message: info.reason ?? "已是最新版本",
+      };
+    }
+
+    // 定时器可能刚起来一轮检查/安装：沿用它的进度，不重复下载
+    if (this.checking || this.installing) {
+      return {
+        accepted: true,
+        fromVersion,
+        toVersion: info.latestVersion,
+        message: `已有更新任务在进行中（目标 v${info.latestVersion}），可在稍后用 status 查看结果`,
+      };
+    }
+
+    // 后台执行（ignoreSkip=true：用户显式触发，可越过「已回滚版本跳过」）
+    void this.check(force, false, true).catch((err) => {
+      this.recordFailure(info.latestVersion, `安装失败：${(err as Error).message}`);
+    });
+    return {
+      accepted: true,
+      fromVersion,
+      toVersion: info.latestVersion,
+      message: force
+        ? `开始安装 v${info.latestVersion}（立即重启）`
+        : `开始安装 v${info.latestVersion}（等待节点空闲后重启）`,
+    };
   }
 
   /**

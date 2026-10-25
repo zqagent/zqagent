@@ -57,14 +57,14 @@ export function cleanLlmValue(v?: string | null): string | undefined {
  * 规范化 Base URL：
  *   - 缺协议时补 `https://`
  *   - 去掉末尾 `/`
- *   - 去掉误填的端点后缀（`/chat/completions`、`/responses`、`/completions`）
+ *   - 去掉误填的端点后缀（`/chat/completions`、`/responses`、`/completions`、`/models`）
  */
 export function normalizeBaseURL(raw?: string | null): string | undefined {
   let s = cleanLlmValue(raw);
   if (!s) return undefined;
   if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) s = `https://${s}`;
   s = s.replace(/\/+$/, "");
-  s = s.replace(/\/(chat\/completions|completions|responses)$/i, "");
+  s = s.replace(/\/(chat\/completions|completions|responses|models)$/i, "");
   return s.replace(/\/+$/, "") || undefined;
 }
 
@@ -225,6 +225,26 @@ export function networkErrorHints(message: string, errorType = ""): string[] {
 }
 
 /**
+ * 「凭据无效」类错误的排查建议（非该类错误返回空数组）。
+ *
+ * 与 `paramErrorHints` 分开：401 不是模型问题，混进去会让「模型类提示」
+ * 在鉴权失败时也冒出来，反而误导。这里只解释「Key 为什么失效、去哪儿换」。
+ *
+ * 内置模型（志前 API）的 Key 由平台托管：用户在控制台重置 Key 后本机这份
+ * 立即失效，必须引导去点「刷新内置模型」，否则会一直看到 401 以为节点坏了。
+ */
+export function authErrorHints(message: string, code = ""): string[] {
+  const text = `${message} ${code}`;
+  if (!/401|403|unauthorized|forbidden|invalid[_\s]*api[_\s]*key|api[\s_-]*key\s*(?:无效|invalid)|管理令牌无效/i.test(text)) {
+    return [];
+  }
+  return [
+    "凭据无效：若用的是「志前大模型（内置）」，在节点设置的模型页点「刷新内置模型」重新领取 Key" +
+      "（在控制台重置过 Key 后需要这一步）；若是自填的供应商，请检查 Key 是否正确或已过期",
+  ];
+}
+
+/**
  * 「模型/参数不被接受」类错误的排查建议（非该类错误返回空数组）。
  *
  * 典型场景（均为阿里兼容模式实测）：
@@ -240,12 +260,18 @@ export function paramErrorHints(message: string, code = ""): string[] {
 
   // 一、账号/开通类
   if (
-    /not[_\s]*(activated|enabled|purchased)|arrearage|quota|subscription|insufficient|未开通|欠费|额度/i.test(
+    /not[_\s]*(activated|enabled|purchased)|arrearage|quota|subscription|insufficient|未开通|欠费|额度|余额不足/i.test(
       text,
     )
   ) {
     hints.push(
       "该模型在此 **API Key/账号** 下未开通（或账号欠费、额度用尽）：到网关控制台开通该模型，或换一个已开通的模型",
+    );
+    // 内置模型（志前 API）走的是用户自己的租户额度，额度用完是最常见的失败原因，
+    // 必须给出「去哪儿充值」而不是让人对着 402 猜
+    hints.push(
+      "如果你用的是「志前大模型（内置）」：到 https://hub.cd-zq.com 查看余额并充值；" +
+        "也可以先切换到你自己配置的其它模型继续（节点设置 → 模型 → 设为默认）",
     );
   }
 

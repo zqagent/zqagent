@@ -16,11 +16,16 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { isInsideRelative } from "../tools/pathSafety.js";
 
 export interface DirEntry {
   name: string;
   path: string;
   type: "dir" | "file";
+  /** 文件字节数（目录为 0） */
+  size: number;
+  /** 修改时间 ISO 8601（stat 失败时为空串） */
+  mtime: string;
 }
 
 export interface DirListing {
@@ -31,6 +36,13 @@ export interface DirListing {
   total?: number;
   /** 条目数超过上限被截断（entries 只是其中一部分） */
   truncated?: boolean;
+  /**
+   * 可切换的根位置：Windows 为存在的盘符（`C:\`、`D:\`…），其他平台为 `["/"]`。
+   *
+   * Windows 上从目录逐级向上只会停在当前盘符的根（`path.dirname("C:\")` 仍是
+   * `C:\`），没有盘符列表就无法浏览其他盘的工作目录。
+   */
+  roots?: string[];
 }
 
 /** 目录搜索命中（性能与截断信息一并回传，供前端提示「N 项，仅显示前 M 项」） */
@@ -50,18 +62,57 @@ const MAX_ENTRIES = 2000;
 const DEFAULT_SEARCH_LIMIT = 200;
 const MAX_SEARCH_LIMIT = 1000;
 
+/** 当前平台可浏览的根位置（Windows 逐盘符探测；其他平台只有 /） */
+function listRoots(): string[] {
+  if (process.platform !== "win32") return ["/"];
+  const out: string[] = [];
+  for (const letter of "CDEFGHIJKLMNOPQRSTUVWXYZ") {
+    const root = `${letter}:\\`;
+    try {
+      if (fs.statSync(root).isDirectory()) out.push(root);
+    } catch {
+      // 盘符不存在 / 未就绪（如空读卡器）：跳过
+    }
+  }
+  return out;
+}
+
+/** 条目的大小与修改时间；stat 失败（权限不足 / 断开软链）时给出安全的空值 */
+function statEntry(full: string): { size: number; mtime: string } {
+  try {
+    const s = fs.statSync(full);
+    // 目录在 Windows/Linux 上的 size 语义不同（0 / 4096），统一按 0 展示
+    return { size: s.isDirectory() ? 0 : s.size, mtime: s.mtime.toISOString() };
+  } catch {
+    return { size: 0, mtime: "" };
+  }
+}
+
 /**
  * 列出目录内容。input 为空时用用户主目录；返回绝对路径 + 父目录 + 条目（目录优先排序）。
  * 路径不存在/不是目录/无权限时抛出带说明的错误。
  */
 export function listDirs(input?: string): DirListing {
-  const base = (input ?? "").trim() || os.homedir();
+  const explicit = (input ?? "").trim();
+  const base = explicit || os.homedir();
   const target = path.resolve(base);
 
   let st: fs.Stats;
   try {
     st = fs.statSync(target);
   } catch {
+    // 没指定路径时的默认起点不可读（如无主目录的服务账户）：退到第一个可用根，
+    // 至少让用户还能通过盘符/根目录继续浏览
+    if (!explicit) {
+      const fallback = listRoots().find((r) => {
+        try {
+          return fs.statSync(r).isDirectory();
+        } catch {
+          return false;
+        }
+      });
+      if (fallback) return listDirs(fallback);
+    }
     throw new Error(`路径不存在: ${target}`);
   }
   if (!st.isDirectory()) throw new Error(`不是目录: ${target}`);
@@ -73,7 +124,7 @@ export function listDirs(input?: string): DirListing {
     throw new Error(`无法读取目录（权限不足？）: ${target}`);
   }
 
-  const entries: DirEntry[] = dirents.map((d) => {
+  const entries: Array<Omit<DirEntry, "size" | "mtime">> = dirents.map((d) => {
     const full = path.join(target, d.name);
     let isDir = d.isDirectory();
     if (d.isSymbolicLink()) {
@@ -95,12 +146,15 @@ export function listDirs(input?: string): DirListing {
   );
 
   const parentDir = path.dirname(target);
+  // 排序、截断后才 stat（大目录下避免为几万个条目逐个 stat）
+  const limited = entries.slice(0, MAX_ENTRIES).map((e) => ({ ...e, ...statEntry(e.path) }));
   return {
     path: target,
     parent: parentDir !== target ? parentDir : null,
-    entries: entries.slice(0, MAX_ENTRIES),
+    entries: limited,
     total: entries.length,
     truncated: entries.length > MAX_ENTRIES,
+    roots: listRoots(),
   };
 }
 
@@ -154,13 +208,12 @@ export function fuzzyScore(name: string, query: string): number | null {
  *
  * - `lower`：小写形式在 readdir 时算一次并缓存 —— 搜索框边输入边搜，避免每次
  *   过滤都为 N 万个名字重新 toLowerCase（那是大目录下过滤的主要分配开销）；
- * - 类型只按目录项判断，软链留到命中后再 stat（命中数 ≤ limit）。
+ * - 类型只按目录项判断，软链的实际类型在命中后再 stat（命中数 ≤ limit）。
  */
 interface NameEntry {
   name: string;
   lower: string;
   isDir: boolean;
-  isLink: boolean;
 }
 
 /** 条目名缓存：TTL / 目录数上限 / 单目录条目数上限（超限不缓存，防内存膨胀） */
@@ -202,7 +255,6 @@ async function loadDirNames(target: string): Promise<NameEntry[]> {
     name: d.name,
     lower: d.name.toLowerCase(),
     isDir: d.isDirectory(),
-    isLink: d.isSymbolicLink(),
   }));
 
   if (entries.length <= NAME_CACHE_MAX_ENTRIES) {
@@ -219,18 +271,24 @@ async function loadDirNames(target: string): Promise<NameEntry[]> {
   return entries;
 }
 
-/** 命中项 → 目录条目（软链才 stat；命中量 ≤ limit，成本可控） */
+/** 命中项 → 目录条目（补大小与修改时间；命中量 ≤ limit，逐条 stat 成本可控） */
 async function toDirEntry(dir: string, e: NameEntry): Promise<DirEntry> {
   const full = path.join(dir, e.name);
   let isDir = e.isDir;
-  if (e.isLink) {
-    try {
-      isDir = (await fs.promises.stat(full)).isDirectory();
-    } catch {
-      // 断开/无权限的软链按文件处理
-    }
+  try {
+    const s = await fs.promises.stat(full);
+    isDir = s.isDirectory();
+    return {
+      name: e.name,
+      path: full,
+      type: isDir ? "dir" : "file",
+      size: isDir ? 0 : s.size,
+      mtime: s.mtime.toISOString(),
+    };
+  } catch {
+    // 断开 / 无权限的软链按文件处理（沿用 dirent 判断的类型）
   }
-  return { name: e.name, path: full, type: isDir ? "dir" : "file" };
+  return { name: e.name, path: full, type: isDir ? "dir" : "file", size: 0, mtime: "" };
 }
 
 /**
@@ -308,6 +366,7 @@ export async function searchDirs(
     query: q,
     total: scored.length,
     truncated: scored.length > entries.length,
+    roots: listRoots(),
   };
 }
 
@@ -326,7 +385,9 @@ export function makeDirIn(parentInput: string | undefined, name: string): DirEnt
 
   const target = path.resolve(parent, clean);
   const rel = path.relative(parent, target);
-  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+  // 空 rel 表示目标就是 parent 本身（如 `a/..`）；`..foo` 这类以点开头的
+  // 合法目录名不能被当成逃逸
+  if (!rel || !isInsideRelative(rel)) {
     throw new Error("目录名不能越出当前目录");
   }
 
@@ -345,5 +406,11 @@ export function makeDirIn(parentInput: string | undefined, name: string): DirEnt
   }
   // 新建后立刻搜索该名字应能命中，不受条目缓存 TTL 影响
   invalidateDirNames(parent);
-  return { name: path.basename(target), path: target, type: "dir" };
+  return {
+    name: path.basename(target),
+    path: target,
+    type: "dir",
+    size: 0,
+    mtime: new Date().toISOString(),
+  };
 }

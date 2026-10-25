@@ -49,6 +49,14 @@ export interface SessionStateEntry {
   status: string;
   /** 用户最近一条发送给 Agent 的消息（截断，供总览列表展示；无消息时 null） */
   lastUserMessage?: string | null;
+  /**
+   * 最近一次**任务请求的开始时刻**（ISO 8601；从未发起过任务时 null）。
+   *
+   * 工作台的节点/项目/任务列表统一按它倒序——用户找的是「最近在跑什么」，
+   * 而不是「最近什么时候跑完的」：长任务运行中时 lastCompletedAt 还是上一轮的，
+   * 按它排会把正在干活的排到后面。
+   */
+  lastStartedAt?: string | null;
   /** 最近一次任务成功完成的时刻（ISO 8601；从未完成时 null） */
   lastCompletedAt?: string | null;
 }
@@ -68,6 +76,18 @@ export type FleetCmdType =
   | "delete_session"
   | "get_state"
   | "get_events"
+  /** 会话轮次汇总（轻量：标题 + 统计，点开某轮再取事件） */
+  | "get_session_turns"
+  /** 单轮详情：用户消息（含补充）+ 最终回复 + 产出文件 */
+  | "get_session_turn_reply"
+  /** 读取聊天记录里保存的附件（用户消息的图片 / 文件） */
+  | "read_session_attachment"
+  /** 变更追踪：本会话的快照列表（每轮一个） */
+  | "get_session_changes"
+  /** 变更追踪：某个快照的完整 patch */
+  | "get_session_change_diff"
+  /** 变更追踪：从快照恢复文件（会改工作区） */
+  | "restore_session_change"
   | "get_config"
   | "update_config"
   | "list_models"
@@ -78,11 +98,24 @@ export type FleetCmdType =
   | "read_file"
   | "download_file"
   | "write_file"
+  /** 按 base64 写入二进制文件（图片编辑后保存） */
+  | "write_file_base64"
   | "create_dir"
   | "create_file"
+  | "delete_files"
   | "search_files"
+  /** 重命名文件 / 目录（只改同一目录下的名字） */
+  | "rename_path"
+  /** 把文件 / 目录移动到工作区内的目标目录（拖拽移动） */
+  | "move_paths"
+  /** 压缩下载：把选中的文件 / 目录打包成 zip（超过上限直接拒绝） */
+  | "zip_download"
   | "list_tools"
   | "list_mcp"
+  /** 整体替换项目的 MCP 服务器配置（控制台设置页保存） */
+  | "update_mcp"
+  /** 连接测试单个 MCP 服务器（不落盘） */
+  | "test_mcp"
   | "project_stats"
   | "run_command"
   | "list_shell_tasks"
@@ -105,11 +138,30 @@ export type FleetCmdType =
   | "git_push"
   | "set_node_label"
   | "get_usage_summary"
+  /** 大模型账户余额（控制台「余额不足」时查看/充值用） */
+  | "get_llm_balance"
   | "get_usage_records"
   | "get_usage_pricing"
   | "update_usage_pricing"
   | "get_node_llm"
   | "update_node_llm"
+  /**
+   * 节点自更新（自更新仅在「SEA 单文件 + 服务托管 + 配置验签公钥」时可用）：
+   *   payload.action = "status" | "check" | "install"
+   *   payload.force  = true 时立即安装（不等空闲，会打断运行中的任务）
+   *
+   * install 先回执、后在后台下载安装并退出进程，由 systemd/launchd 拉起新版本；
+   * 因此**回执成功不等于已升级**，需再用 status 确认版本。
+   */
+  | "self_update"
+  /**
+   * 重新拉取平台内置模型（志前 API）的凭据。
+   *
+   * 内置模型在接入 Hub 时下发，正常情况下用户无需关心；这里用于
+   * 「Key 在控制台被重置」或用户在控制台点「刷新」时重取。
+   * 会改写节点侧的 LLM 配置，属写指令（不参与只读并发池）。
+   */
+  | "refresh_builtin_llm"
   | "list_node_llm_models"
   | "set_fleet_cred"
   | "rename_session"
@@ -119,6 +171,7 @@ export type FleetCmdType =
   | "set_session_draft"
   | "submit_turn"
   | "steer"
+  | "unsteer"
   | "interrupt"
   | "resume"
   | "approval_answer"
@@ -142,6 +195,12 @@ export const FLEET_CMD_TYPES: readonly FleetCmdType[] = [
   "delete_session",
   "get_state",
   "get_events",
+  "get_session_turns",
+  "get_session_turn_reply",
+  "read_session_attachment",
+  "get_session_changes",
+  "get_session_change_diff",
+  "restore_session_change",
   "get_config",
   "update_config",
   "list_models",
@@ -152,11 +211,18 @@ export const FLEET_CMD_TYPES: readonly FleetCmdType[] = [
   "read_file",
   "download_file",
   "write_file",
+  "write_file_base64",
   "create_dir",
   "create_file",
+  "delete_files",
   "search_files",
+  "rename_path",
+  "move_paths",
+  "zip_download",
   "list_tools",
   "list_mcp",
+  "update_mcp",
+  "test_mcp",
   "project_stats",
   "run_command",
   "list_shell_tasks",
@@ -178,11 +244,14 @@ export const FLEET_CMD_TYPES: readonly FleetCmdType[] = [
   "git_push",
   "set_node_label",
   "get_usage_summary",
+  "get_llm_balance",
   "get_usage_records",
   "get_usage_pricing",
   "update_usage_pricing",
   "get_node_llm",
   "update_node_llm",
+  "self_update",
+  "refresh_builtin_llm",
   "list_node_llm_models",
   "set_fleet_cred",
   "rename_session",
@@ -192,6 +261,7 @@ export const FLEET_CMD_TYPES: readonly FleetCmdType[] = [
   "set_session_draft",
   "submit_turn",
   "steer",
+  "unsteer",
   "interrupt",
   "resume",
   "approval_answer",
@@ -256,7 +326,12 @@ export interface FleetStatus {
   platform?: string;
   mode?: string;
   version?: string;
-  /** 节点主 IP（非内网回环地址；多网卡取首个非虚拟 IPv4，缺省 IPv6） */
+  /**
+   * 节点自报的主 IP（网卡地址：首个非回环 IPv4，缺省 IPv6）。
+   *
+   * 它是内网地址，控制台展示节点公网 IP 时应以网关观察到的连接来源为准
+   * （见 gateway `NodeStateInfo.peer_ip`）。
+   */
   ip?: string;
 }
 
@@ -310,6 +385,30 @@ export interface FleetCredential {
   label?: string;
   /** 接入时间（ISO 字符串） */
   enrolledAt?: string;
+  /**
+   * 平台内置大模型（志前 API）：接入 Hub 时由控制面下发，节点侧落盘为
+   * `id=__zqai__` 的不可删除供应商。
+   *
+   * 这里只是「接入那一刻的快照」；凭据轮换或首次缺失时，节点会调用
+   * `GET /api/hub/node/builtin-llm` 重新拉取（见 core 的 builtinLlm.ts）。
+   */
+  builtinLlm?: BuiltinLlmGrant;
+}
+
+/** 平台内置模型的接入凭据（下发给节点） */
+export interface BuiltinLlmGrant {
+  /** 固定为 `__zqai__` */
+  providerId: string;
+  /** 展示名 */
+  name: string;
+  /** OpenAI 兼容基址，如 https://zqai-api.cd-zq.com/v1 */
+  baseURL: string;
+  /** 用户的 API Key（节点侧加密落盘） */
+  apiKey: string;
+  /** 默认模型 */
+  model: string;
+  /** 该账号可用的模型列表 */
+  models?: string[];
 }
 
 /** topic 构建 */

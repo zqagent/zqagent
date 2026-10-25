@@ -8,9 +8,13 @@
  */
 
 import type { ApprovalOutcome } from "../engine/events.js";
+import type { StoredAttachment } from "../engine/attachments.js";
 import type { NotificationChannelConfig } from "@zqagent/shared";
 import type { McpServerConfig } from "../mcp/McpClient.js";
 import type { ModelMeta } from "../providers/models.js";
+import type { ShellPolicy } from "../permissions/PermissionEngine.js";
+import type { SandboxMode } from "../tools/sandbox.js";
+import type { VcsConfigMode } from "../vcs/plan.js";
 
 // 通知相关类型已迁移至 @zqagent/shared（core 与 hub 共用），此处再导出保持兼容。
 export type {
@@ -80,6 +84,22 @@ export interface TenantConfig {
   mcpServers?: McpServerConfig[];
   /** 命令白名单（可省略，默认空） */
   allowedCommands?: string[];
+  /** shell 免审策略（默认 approve；开启后配合 sandbox 可减少审批） */
+  shellPolicy?: ShellPolicy;
+  /** OS 级沙箱（默认关闭，保持既有部署行为） */
+  sandbox?: {
+    mode?: SandboxMode;
+    /** 额外可写路径（工作区之外） */
+    extraWritable?: string[];
+  };
+  /**
+   * 变更追踪（默认 auto）：记录每个会话每轮改了什么。
+   * 项目本身是 git 仓库时复用（独立 index + refs/agent/*，不影响用户分支），
+   * 否则在 .agent/vcs 建影子仓库；off 可关闭。
+   */
+  vcs?: {
+    mode?: VcsConfigMode;
+  };
   /** 指令签名密钥（密文，AES-256-GCM）。内存态由运行时解密持有 */
   tenantSecretEnc?: string;
   /** 通知通道配置（敏感字段密文存储） */
@@ -150,6 +170,13 @@ export interface SessionRecord {
   nameSource?: "auto" | "user";
   /** 已成功完成的任务数（用于第 1/3/5 次自动命名） */
   taskCount?: number;
+  /**
+   * 最近一次任务请求的开始时刻（ISO 8601；从未发起过任务时缺省）。
+   *
+   * 工作台按它排序「最近在跑什么」。不能用 lastCompletedAt 代替：任务运行中时
+   * 后者仍是上一轮的时间，长任务会被排到后面。
+   */
+  lastStartedAt?: string;
   /** 最近一次任务成功完成的时刻（ISO 8601；从未完成时缺省） */
   lastCompletedAt?: string;
   /** 会话 model 是否由用户显式指定（非继承自租户配置） */
@@ -214,6 +241,59 @@ export interface PendingQuestion {
   resolve: (a: string) => void;
   record: QuestionRecord;
   timer: NodeJS.Timeout;
+}
+
+/** 轮次索引里的一条用户消息（补充消息也在此列） */
+export interface SessionTurnInput {
+  /** 该消息对应事件的 seq */
+  seq: number;
+  /** ISO 时间戳 */
+  ts: string;
+  /** 消息正文（超长截断） */
+  text: string;
+  /**
+   * 这条消息附带的图片 / 文件（落盘引用，非 base64）。
+   *
+   * 控制台在用户消息上方显示缩略图、聊天详情里回看；字节本体在
+   * `sessions/<id>/attachments/`，按需经 `readSessionAttachment` 取。
+   */
+  attachments?: StoredAttachment[];
+}
+
+/**
+ * 轮次索引（`sessions/{id}/turns.ndjson` 的一行）。
+ *
+ * 同一 `startSeq` 可能有多行（running → completed 的版本推进），
+ * 读取时取最后一行。索引是 events.jsonl 的派生数据：
+ * 丢失或落后时可从事件流重建（`Store.rebuildTurnIndex`）。
+ */
+export interface SessionTurnIndexEntry {
+  /** 格式版本（当前为 1） */
+  v: 1;
+  /** 本轮 turn_start 的 seq */
+  startSeq: number;
+  /** 本轮最后一条事件的 seq */
+  endSeq: number;
+  startedAt: string;
+  /** 未结束时为 null */
+  endedAt: string | null;
+  /** running / completed / error / interrupted */
+  status: string;
+  /** 用户消息（含运行中补充），按时间升序 */
+  inputs: SessionTurnInput[];
+  /** 最后一条非空 assistant_message 的 seq（取完整回复用） */
+  replySeq?: number;
+  /** 最后一条助手回复（截断，供列表展示） */
+  replyPreview: string;
+  /** 本轮产出文件（来自 turn_end.data.produced_files） */
+  producedFiles: string[];
+  llmCalls: number;
+  toolCalls: number;
+  tokensIn: number;
+  tokensOut: number;
+  iterations?: number;
+  durationMs?: number;
+  error?: string;
 }
 
 /** 事件缓冲条目 */

@@ -7,6 +7,8 @@
  * 启动方式：`tsx src/cli/index.ts`（开发）或 `zqagent`（安装后）
  */
 
+// 必须排在所有依赖之前：静音 Node 内置 punycode 的 DEP0040 警告（细节见该文件）
+import "./quietDeprecations.js";
 import "dotenv/config";
 import * as fs from "fs";
 import * as readline from "readline";
@@ -33,6 +35,12 @@ import {
   parsePicks,
   setPlanHandler,
   setDirectoryHandler,
+  loadPermissionConfig,
+  resolveSandbox,
+  describeSandbox,
+  resolveVcsPlan,
+  SessionVcs,
+  VcsHook,
 } from "../index.js";
 import type {
   WsEvent,
@@ -47,6 +55,18 @@ import type {
   StreamChunk,
 } from "../index.js";
 import {
+  normalizeMcpConfigs,
+  readMcpConfigFile,
+  saveMcpConfigFile,
+  splitCommandLine,
+  withBuiltinMcpConfigs,
+} from "../mcp/config.js";
+import {
+  applyMcpPreset,
+  MCP_PRESETS,
+  type McpPreset,
+} from "../mcp/presets.js";
+import {
   loadConnection,
   loadConnectionById,
   saveConnection,
@@ -54,7 +74,8 @@ import {
   listConnections,
   useConnection,
   removeConnection,
-  fetchModels,
+  fetchModelsWithDiagnostics,
+  describeModelFetchFailure,
   fetchModelContext,
   probeModel,
   modelContextWindow,
@@ -62,6 +83,7 @@ import {
   PROVIDERS,
 } from "./connection.js";
 import type { ConnectionConfig } from "./connection.js";
+import { BUILTIN_PROVIDER_ID } from "../server/llmIds.js";
 import { InputRouter, countRawEscapes, patchReadlineHistoryNav } from "./input.js";
 import { createRequire } from "module";
 import { renderBanner } from "./banner.js";
@@ -72,9 +94,10 @@ import {
   renderTerminalTutorial,
 } from "./terminalSetup.js";
 import { cliErr, cliLog, cliWrite, UNICODE_SUPPORTED } from "../terminal.js";
-import { paramErrorHints } from "../providers/diagnostics.js";
+import { authErrorHints, paramErrorHints } from "../providers/diagnostics.js";
 import { stateDir } from "../paths.js";
 import { runLinkCommand } from "./link.js";
+import { runRenameCommand } from "./rename.js";
 import { runServeCommand } from "./serve.js";
 import { runUpdateCommand } from "./update.js";
 import {
@@ -92,6 +115,7 @@ import {
   debugStageAsync,
 } from "./debug.js";
 import {
+  DEFAULT_MAX_ITERATIONS,
   parseMaxIterations,
   parseOptionalPositiveNumber,
   parseRatio,
@@ -110,12 +134,20 @@ if (enableDebug(process.argv)) {
 
 // ===================== 配置 =====================
 
-/** 模型标识（环境变量 OPENAI_MODEL，默认 gpt-4o） */
-const MODEL = process.env.OPENAI_MODEL ?? "gpt-4o";
+/**
+ * 环境变量里指定的模型（`OPENAI_MODEL`）。
+ *
+ * 不再兜底成 `gpt-4o`：没配就保持空，启动横幅显示「未选择」，第一次发消息时
+ * 提示去 `/connect` 选模型，而不是拿一个用户根本没有 Key 的型号去请求。
+ */
+const MODEL = process.env.OPENAI_MODEL ?? "";
 /** 工作区根目录（环境变量 WORKSPACE，默认当前目录） */
 const WORKSPACE = path.resolve(process.env.WORKSPACE ?? ".");
-/** 单轮最大迭代次数（环境变量 MAX_ITERATIONS 可覆盖，默认 300） */
-const MAX_ITERATIONS = parseMaxIterations(process.env.MAX_ITERATIONS, 300);
+/** 单轮最大迭代次数（环境变量 MAX_ITERATIONS 可覆盖，缺省 DEFAULT_MAX_ITERATIONS） */
+const MAX_ITERATIONS = parseMaxIterations(
+  process.env.MAX_ITERATIONS,
+  DEFAULT_MAX_ITERATIONS,
+);
 /** 持久化目录（跨平台：见 paths.ts） */
 const STATE_DIR = stateDir();
 
@@ -267,22 +299,26 @@ function saveJsonFile(file: string, data: unknown): void {
   }
 }
 
-/** 从 MCP_FILE 加载 MCP 服务器配置 */
+/**
+ * 从 MCP_FILE 加载 MCP 服务器配置。
+ * 兼容裸数组 / {servers} / {mcpServers}（Claude/Cursor）等格式，
+ * 并追加内置默认服务器（如 OCR）。
+ */
 function loadMcpConfigs(): McpServerConfig[] {
-  return loadJsonArray<McpServerConfig>(
-    MCP_FILE,
-    (v) =>
-      !!v &&
-      typeof v === "object" &&
-      typeof (v as McpServerConfig).name === "string" &&
-      ((v as McpServerConfig).type === "stdio" ||
-        (v as McpServerConfig).type === "http"),
-  );
+  const { configs, warnings } = readMcpConfigFile(MCP_FILE);
+  for (const w of warnings) cliErr(`⚠️  MCP 配置: ${w}`);
+  return withBuiltinMcpConfigs(configs);
 }
 
 /** 保存 MCP 服务器配置（完整快照） */
 function saveMcpConfigs(): void {
-  saveJsonFile(MCP_FILE, mcpManager?.listConfigs() ?? []);
+  // manager 尚未创建时回退到当前加载的配置，避免把已有文件清空
+  const configs = mcpManager?.listConfigs() ?? loadMcpConfigs();
+  try {
+    saveMcpConfigFile(MCP_FILE, configs);
+  } catch (err) {
+    cliErr(`⚠️  保存 MCP 配置失败: ${err}`);
+  }
 }
 
 /** 从 COMMAND_TOOLS_FILE 加载命令工具定义 */
@@ -430,18 +466,24 @@ let sessionMeta: SessionMeta = { sessionId: SESSION_ID, taskCount: 0 };
 /** 是否有正在进行的会话命名请求（防重入） */
 let namingInFlight = false;
 
-// 命令白名单 (Auto 模式下自动允许的命令前缀)
-const ALLOWED_COMMANDS = [
-  "ls",
-  "pwd",
-  "cat",
-  "head",
-  "tail",
-  "wc",
-  "git status",
-  "git diff",
-  "git log",
-];
+// 权限配置：项目级 `.agent/permissions.json`，缺省时用内置默认值
+// （命令白名单 / shell 免审策略 / 启动模式 / 沙箱配置）
+const PERM_CONFIG = loadPermissionConfig(WORKSPACE);
+const ALLOWED_COMMANDS = PERM_CONFIG.allowedCommands;
+// 沙箱方案只解析一次：探测结果有缓存，引擎重建时复用同一份
+const SANDBOX_PLAN = resolveSandbox({
+  mode: PERM_CONFIG.sandbox.mode,
+  extraWritable: PERM_CONFIG.sandbox.extraWritable,
+  workspace: WORKSPACE,
+});
+
+/**
+ * 当前会话的变更追踪（引擎重建时随 buildEngine 一起替换）。
+ * 模块级是因为命令处理器（/changes、/restore）需要访问，
+ * 而它们不在 buildEngine 的作用域内。
+ */
+let sessionVcs: SessionVcs | null = null;
+let vcsHook: VcsHook | null = null;
 
 // ===================== 模式切换 (Tab) =====================
 
@@ -638,14 +680,18 @@ async function cliApprover(
  * 未配置 LLM 连接时的占位 Provider：实现 ProviderClient 接口，被调用时
  * 抛出友好提示，引导用户先运行 /connect。避免 CLI 在「无任何配置」时
  * 因 OpenAIProvider 构造函数抛错而无法启动。
+ *
+ * `message` 供「有 Key 但没选模型」这类半配置状态复用，提示要具体。
  */
-function createUnconfiguredProvider(): ProviderClient {
+function createUnconfiguredProvider(
+  message = "❌ 尚未配置 LLM 连接，请先运行 /connect",
+): ProviderClient {
   return {
     async stream(): Promise<AsyncIterable<StreamChunk>> {
-      throw new Error("❌ 尚未配置 LLM 连接，请先运行 /connect");
+      throw new Error(message);
     },
     async chat(): Promise<string | null> {
-      throw new Error("❌ 尚未配置 LLM 连接，请先运行 /connect");
+      throw new Error(message);
     },
   };
 }
@@ -656,6 +702,17 @@ function createUnconfiguredProvider(): ProviderClient {
  * 使用 createDefaultEngine 一键装配核心组件，然后注入
  * ConsoleHook + FileLogHook 组合钩子与 CLI 审批器。
  */
+/** 从会话快照里取权限模式；缺失或非法时返回 null */
+function restoredMode(state?: SavedState | null): Mode | null {
+  const m = state?.permissionMode;
+  return m === Mode.DISCUSS ||
+    m === Mode.PLAN ||
+    m === Mode.INTERACTIVE ||
+    m === Mode.AUTO
+    ? m
+    : null;
+}
+
 function buildEngine(
   sessionId: string,
   savedState?: SavedState | null,
@@ -663,15 +720,22 @@ function buildEngine(
   const fileHook = new FileLogHook(sessionId, STATE_DIR);
   // explore 的结果卡片只留一行摘要：完整报告已由 SubagentHook 渲染在子代理进度块里
   const consoleHook = new ConsoleHook({ compactResultTools: ["explore"] });
-  const hook = new CompositeHook([consoleHook, fileHook]);
+  // 变更追踪：每轮结束记一个快照，便于事后审计与回滚
+  sessionVcs = new SessionVcs(
+    resolveVcsPlan(WORKSPACE, { mode: PERM_CONFIG.vcs.mode }),
+    sessionId,
+  );
+  vcsHook = new VcsHook(sessionVcs);
+  const hook = new CompositeHook([consoleHook, fileHook, vcsHook]);
 
   // Provider 装配优先级：
   //   1. /connect 配置存在 → 用配置的 key/baseURL 创建；
   //   2. 有 OPENAI_API_KEY 环境变量 → 不传 provider（createDefaultEngine 内部用环境变量创建）；
-  //   3. 全无配置 → 用占位 Provider（避免启动崩溃，引导用户 /connect）。
+  //   3. 全无配置（或只有 Key 没选模型）→ 用占位 Provider
+  //      （避免启动崩溃，第一次发消息时提示具体该补什么）。
   const conn = currentConnection;
   const hasEnvKey = !!process.env.OPENAI_API_KEY;
-  // 当前生效模型：会话状态覆盖配置，最后落到环境默认
+  // 当前生效模型：会话状态覆盖配置，最后落到环境变量；都没有就是空（未选择）
   const model = savedState?.model ?? conn?.model ?? MODEL;
   const provider = conn
     ? new OpenAIProvider({
@@ -679,17 +743,27 @@ function buildEngine(
         baseURL: conn.baseURL,
         logDir: ".logs/llm",
       })
-    : hasEnvKey
+    : hasEnvKey && model
       ? undefined
-      : createUnconfiguredProvider();
+      : createUnconfiguredProvider(
+          hasEnvKey
+            ? "❌ 尚未选择模型，请运行 /connect 选择，或设置 OPENAI_MODEL 环境变量"
+            : undefined,
+        );
   const engine = createDefaultEngine({
     workspace: WORKSPACE,
     model,
     provider,
     reasoningEffort: conn?.reasoningEffort ?? undefined,
-    mode: Mode.INTERACTIVE,
+    // 恢复会话时沿用上次的模式（SavedState 持久化），否则用配置里的默认模式
+    mode: restoredMode(savedState) ?? PERM_CONFIG.mode,
     maxIterations: MAX_ITERATIONS,
     allowedCommands: ALLOWED_COMMANDS,
+    shellPolicy: PERM_CONFIG.shellPolicy,
+    sandbox: {
+      mode: PERM_CONFIG.sandbox.mode,
+      extraWritable: PERM_CONFIG.sandbox.extraWritable,
+    },
     hook,
     // explore 子代理的执行过程缩进打印（工厂：并发 explore 各自独立渲染）
     subagentHookFactory: () => new SubagentHook(),
@@ -714,13 +788,36 @@ function buildEngine(
 
   engine.setApprover(cliApprover);
 
+  // 恢复会话级授权（「总是允许此工具 / 此命令」），否则重建引擎后又得重新审批
+  for (const t of savedState?.allowTools ?? []) {
+    engine.permissions.allowToolForSession(t);
+  }
+  for (const c of savedState?.allowCommands ?? []) {
+    engine.permissions.allowCommandForSession(c);
+  }
+
   // 挂 fileHook 引用到 engine 上（用于 SIGINT 保存状态）
   (engine as unknown as Record<string, unknown>)["_fileHook"] = fileHook;
 
   // MCP 管理器：首次创建时绑定 registry 并加载配置；引擎重建时切换 registry
   // （已建立的连接不中断，工具重新注入到新 registry）
   if (!mcpManager) {
-    mcpManager = new McpManager(engine.registry, loadMcpConfigs());
+    mcpManager = new McpManager(engine.registry, loadMcpConfigs(), {
+      builtin: {
+        workspace: WORKSPACE,
+        env: process.env,
+        // 多模态 OCR 兜底：与当前 LLM 连接共用同一端点与密钥
+        llm: conn
+          ? { baseURL: conn.baseURL, apiKey: conn.apiKey, model }
+          : process.env.OPENAI_API_KEY
+            ? {
+                apiKey: process.env.OPENAI_API_KEY,
+                baseURL: process.env.OPENAI_BASE_URL,
+                model,
+              }
+            : undefined,
+      },
+    });
   } else {
     mcpManager.attach(engine.registry);
   }
@@ -729,6 +826,264 @@ function buildEngine(
   registerCommandTools(engine.registry, loadCommandTools());
 
   return engine;
+}
+
+// ===================== /mcp 安装向导与导入 =====================
+
+/** 打印手动安装用法 */
+function printMcpAddUsage(): void {
+  cliLog("用法: /mcp add <name> stdio <command...>");
+  cliLog("      /mcp add <name> http|sse <url>");
+  cliLog("      /mcp add          → 交互式选择模板");
+  cliLog("      /mcp import [file] → 导入 Claude/Cursor 等配置");
+}
+
+/** `/mcp add`（无参数）交互式安装向导 */
+async function mcpAddWizard(): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    cliLog("当前环境不支持交互式向导。");
+    printMcpAddUsage();
+    return;
+  }
+
+  type Choice = {
+    id: string;
+    title: string;
+    description: string;
+    preset?: McpPreset;
+  };
+  const choices: Choice[] = [
+    ...MCP_PRESETS.map((p) => ({
+      id: p.id,
+      title: p.title,
+      description: p.description,
+      preset: p,
+    })),
+    {
+      id: "__custom_stdio__",
+      title: "自定义 stdio 命令",
+      description: "手动输入本地启动命令",
+    },
+    {
+      id: "__custom_http__",
+      title: "自定义 HTTP / SSE 端点",
+      description: "手动输入远程 URL 与请求头",
+    },
+  ];
+
+  cliLog("\n🧩 安装 MCP 服务器：");
+  choices.forEach((c, i) =>
+    cliLog(`  [${i + 1}] ${c.title} — ${c.description}`),
+  );
+  const ans = (await question(`选择 (1-${choices.length}，回车取消): `)).trim();
+  if (!ans) {
+    cliLog("已取消");
+    return;
+  }
+  const idx = parseInt(ans, 10) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= choices.length) {
+    cliLog("❌ 已取消（无效选择）");
+    return;
+  }
+  const choice = choices[idx]!;
+
+  let config: McpServerConfig | null = null;
+
+  if (choice.id === "__custom_stdio__") {
+    const name = (await question("名称: ")).trim();
+    const cmd = (await question("启动命令（含参数，支持引号）: ")).trim();
+    if (!name || !cmd) {
+      cliLog("❌ 名称与命令均不能为空，已取消");
+      return;
+    }
+    config = {
+      name,
+      type: "stdio",
+      command: splitCommandLine(cmd),
+      enabled: true,
+    };
+    const envAns = (
+      await question("环境变量（key=value，逗号分隔，可留空）: ")
+    ).trim();
+    if (envAns) {
+      const env: Record<string, string> = {};
+      for (const pair of envAns.split(/[,\s]+/)) {
+        const eq = pair.indexOf("=");
+        if (eq > 0) env[pair.slice(0, eq)] = pair.slice(eq + 1);
+      }
+      if (Object.keys(env).length > 0) config.env = env;
+    }
+  } else if (choice.id === "__custom_http__") {
+    const name = (await question("名称: ")).trim();
+    const url = (await question("URL: ")).trim();
+    if (!name || !url) {
+      cliLog("❌ 名称与 URL 均不能为空，已取消");
+      return;
+    }
+    config = {
+      name,
+      type: /\/sse(?:[?#]|$)/i.test(url) ? "sse" : "http",
+      url,
+      enabled: true,
+    };
+    const headerAns = (
+      await question("请求头（key=value，逗号分隔，可留空）: ")
+    ).trim();
+    if (headerAns) {
+      const headers: Record<string, string> = {};
+      for (const pair of headerAns.split(/[,\s]+/)) {
+        const eq = pair.indexOf("=");
+        if (eq > 0) headers[pair.slice(0, eq)] = pair.slice(eq + 1);
+      }
+      if (Object.keys(headers).length > 0) config.headers = headers;
+    }
+  } else {
+    const preset = choice.preset!;
+    const values: Record<string, string> = {};
+    for (const field of preset.fields ?? []) {
+      const def = field.default ?? "";
+      const hint = def ? `（默认 ${def}）` : "";
+      const promptText = `${field.label}${hint}: `;
+      const raw = field.secret
+        ? await readPassword(promptText)
+        : (await question(promptText)).trim();
+      const value = raw || def;
+      if (field.required && !value) {
+        cliLog(`❌ "${field.label}" 为必填项，已取消`);
+        return;
+      }
+      values[field.key] = value;
+    }
+    config = applyMcpPreset(preset, values);
+    if (config.type === "stdio") {
+      config.command = (config.command ?? []).map((c) =>
+        c === "" ? WORKSPACE : c,
+      );
+    }
+  }
+
+  // 名称冲突时自动加序号，避免覆盖已有配置
+  if (mcpManager!.hasConfig(config.name)) {
+    let i = 2;
+    while (mcpManager!.hasConfig(`${config.name}_${i}`)) i += 1;
+    config.name = `${config.name}_${i}`;
+  }
+
+  try {
+    await mcpManager!.addConfig(config);
+    saveMcpConfigs();
+    cliLog(`✅ 已安装并连接 MCP server "${config.name}"（工具已注入）`);
+  } catch (err) {
+    saveMcpConfigs();
+    cliLog(`⚠️  配置已保存，但连接失败: ${err}`);
+    cliLog(`   可用 /mcp refresh ${config.name} 重试`);
+  }
+}
+
+/** `/mcp import [file]`：导入任意受支持格式的 MCP 配置 */
+async function mcpImportCommand(file?: string): Promise<void> {
+  let raw: unknown;
+  if (file) {
+    const target = path.isAbsolute(file) ? file : path.resolve(WORKSPACE, file);
+    try {
+      raw = JSON.parse(fs.readFileSync(target, "utf8"));
+    } catch (err) {
+      cliLog(`❌ 读取配置失败: ${err}`);
+      return;
+    }
+  } else {
+    if (!process.stdin.isTTY) {
+      cliLog("非交互环境请使用 /mcp import <file>");
+      return;
+    }
+    cliLog(
+      "粘贴 MCP 配置 JSON（支持 mcpServers 格式），最后单独一行输入 EOF：",
+    );
+    const lines: string[] = [];
+    for (;;) {
+      const line = await question("");
+      if (line.trim() === "EOF") break;
+      lines.push(line);
+      if (lines.length > 5000) {
+        cliLog("❌ 输入过长，已取消");
+        return;
+      }
+    }
+    if (lines.length === 0) {
+      cliLog("已取消");
+      return;
+    }
+    try {
+      raw = JSON.parse(lines.join("\n"));
+    } catch (err) {
+      cliLog(`❌ JSON 解析失败: ${err}`);
+      return;
+    }
+  }
+
+  const { configs, warnings } = normalizeMcpConfigs(raw);
+  for (const w of warnings) cliLog(`⚠️  ${w}`);
+  if (configs.length === 0) {
+    cliLog("❌ 没有解析到有效的 MCP 服务器配置");
+    return;
+  }
+
+  cliLog(`\n解析到 ${configs.length} 个 MCP 服务器：`);
+  for (const c of configs) {
+    const target =
+      c.type === "stdio"
+        ? (c.command ?? []).join(" ")
+        : (c.url ?? c.builtin ?? "");
+    cliLog(`  ${c.name} [${c.type}] ${target}`);
+  }
+  const confirm = (await question("导入以上配置？[Y/n]: "))
+    .trim()
+    .toLowerCase();
+  if (confirm === "n" || confirm === "no") {
+    cliLog("已取消");
+    return;
+  }
+
+  let added = 0;
+  let updated = 0;
+  let failed = 0;
+  for (const cfg of configs) {
+    if (mcpManager!.hasConfig(cfg.name)) {
+      const ans = (
+        await question(
+          `"${cfg.name}" 已存在，[o]覆盖 / [s]跳过（默认 s）: `,
+        )
+      )
+        .trim()
+        .toLowerCase();
+      if (ans !== "o" && ans !== "overwrite") continue;
+      try {
+        await mcpManager!.updateConfig(cfg.name, cfg);
+        updated += 1;
+      } catch (err) {
+        failed += 1;
+        cliLog(
+          `⚠️  "${cfg.name}" 连接失败: ${err}（配置已保存，可用 /mcp refresh ${cfg.name} 重试）`,
+        );
+      }
+    } else {
+      try {
+        await mcpManager!.addConfig(cfg);
+        added += 1;
+      } catch (err) {
+        failed += 1;
+        cliLog(
+          `⚠️  "${cfg.name}" 连接失败: ${err}（配置已保存，可用 /mcp refresh ${cfg.name} 重试）`,
+        );
+      }
+    }
+  }
+  saveMcpConfigs();
+  cliLog(
+    `✅ 导入完成：新增 ${added}，覆盖 ${updated}，连接失败 ${failed}${
+      failed > 0 ? "（失败项配置已保存）" : ""
+    }`,
+  );
 }
 
 // ===================== /connect 向导 =====================
@@ -798,7 +1153,8 @@ async function connectWizard(): Promise<ConnectionConfig | null> {
   // 不能对话的模型只会在第一次请求时收到 InvalidParameter，因此这里
   // 把对话模型排在前面、给非对话模型打标记，并在选定后自检一次。
   cliLog(`\n正在通过 ${baseURL} 刷新模型列表...`);
-  const modelResult = await fetchModels(baseURL, apiKey);
+  const modelDiag = await fetchModelsWithDiagnostics(baseURL, apiKey);
+  const modelResult = modelDiag.result;
   const nonChat = new Set(modelResult?.nonChat ?? []);
   let model = "";
 
@@ -835,7 +1191,11 @@ async function connectWizard(): Promise<ConnectionConfig | null> {
         return null;
       }
     } else {
-      cliLog("⚠️  未能获取模型列表（/models 接口不可用或 Key 无效）");
+      // 打印「试过哪些端点、各自为什么失败」：只报「接口不可用」无法排查
+      cliLog("⚠️  未能获取模型列表");
+      for (const line of describeModelFetchFailure(baseURL, modelDiag).split("\n")) {
+        cliLog(`   ${line}`);
+      }
       const mm = (await question("请手动输入模型名: ")).trim();
       if (!mm) {
         cliLog("❌ 已取消");
@@ -852,7 +1212,10 @@ async function connectWizard(): Promise<ConnectionConfig | null> {
       break;
     }
     cliLog(`❌ 自检失败: ${probe.error}${probe.code ? ` | ${probe.code}` : ""}`);
-    for (const hint of paramErrorHints(probe.error ?? "", probe.code ?? "")) {
+    for (const hint of [
+      ...authErrorHints(probe.error ?? "", probe.code ?? ""),
+      ...paramErrorHints(probe.error ?? "", probe.code ?? ""),
+    ]) {
       cliLog(`   💡 ${hint}`);
     }
     const keep = (
@@ -1200,7 +1563,7 @@ async function offerTerminalSetup(
 // ===================== 版本 / 用法 =====================
 
 /** 已支持的命令行子命令（其余裸词视为未知，避免静默进入 REPL） */
-const KNOWN_SUBCOMMANDS = new Set(["link", "serve", "update"]);
+const KNOWN_SUBCOMMANDS = new Set(["link", "serve", "update", "rename"]);
 
 /**
  * CLI 版本：优先环境变量（发布构建注入 `ZQAGENT_VERSION`），
@@ -1229,11 +1592,14 @@ function printCliUsage(): void {
   cliLog("  zqagent serve [选项]           以 headless 方式常驻为可被 Hub 管理的节点");
   cliLog("  zqagent update [--status|--check|--now|--rollback]");
   cliLog("                                 查看/手动触发节点自动更新");
-  cliLog("  zqagent link --hub <url> --code <接入码> [--label 名称]");
-  cliLog("                                 把本机节点接入 Hub（本机有 server 时热接入）");
+  cliLog("  zqagent link [--hub <url>] [--username <邮箱/手机号> --password <密码>]");
+  cliLog("               [--code <接入码>] [--label 名称]");
+  cliLog("                                 把本机节点接入 Hub（账号直连或接入码；本机有 server 时热接入）");
+  cliLog("  zqagent rename <名称>          修改节点在 Hub 显示的名称（本机与 Hub 记录一起更新）");
   cliLog("");
   cliLog("serve 选项：--port <n>  --host <addr>  --data-dir <dir>");
   cliLog("            --hub <url> --enroll-code <码> --label <名称>   （启动即接入）");
+  cliLog("            --hub <url> --username <邮箱/手机号> --password <密码>（账号接入）");
   cliLog("其它选项：--resume <会话ID>   --debug   --help/-h   --version/-v");
 }
 
@@ -1261,7 +1627,15 @@ async function main() {
     process.exit(0);
   }
   if (subcommand === "link") {
-    const ok = await runLinkCommand(process.argv.slice(3));
+    const ok = await runLinkCommand(process.argv.slice(3), {
+      rl,
+      interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    });
+    rl.close();
+    process.exit(ok ? 0 : 1);
+  }
+  if (subcommand === "rename") {
+    const ok = await runRenameCommand(process.argv.slice(3));
     rl.close();
     process.exit(ok ? 0 : 1);
   }
@@ -1299,7 +1673,8 @@ async function main() {
 
   // 加载已保存的 LLM 连接配置（若有），供横幅展示与引擎构建使用
   currentConnection = debugStage("loadConnection", () => loadConnection());
-  const bannerModel = currentConnection?.model ?? MODEL;
+  // 空模型显示成「未选择」，而不是表格里空一格让人以为界面坏了
+  const bannerModel = (currentConnection?.model ?? MODEL) || "未选择";
   const bannerProvider = currentConnection
     ? (PROVIDERS[currentConnection.provider]?.label ??
       currentConnection.provider)
@@ -1501,6 +1876,12 @@ async function main() {
     buildEngine(SESSION_ID, savedState),
   );
 
+  // 让用户明确知道当前的 shell 隔离能力与免审策略：
+  // 沙箱未生效时（典型是 Windows）工作区判定只是降噪，不是安全边界
+  cliLog(
+    `🛡  shell 免审: ${PERM_CONFIG.shellPolicy} | 沙箱: ${describeSandbox(SANDBOX_PLAN)}`,
+  );
+
   // 启动时连接已配置的 MCP 服务器并注入工具（失败不阻断启动）
   const mcpResult = await debugStageAsync("mcp.connectAll", () =>
     mcpManager!.connectAll(),
@@ -1533,14 +1914,24 @@ async function main() {
 
   // SIGINT / Ctrl+C 处理：保存状态并显示会话 ID
   _exitHandler = () => {
-    saveEngineState(engine);
-    void mcpManager?.closeAll(); // 优雅断开 MCP 子进程（不阻塞退出）
-    cliLog(`\n\n📋 会话ID: ${SESSION_ID}`);
-    cliLog(`💾 状态已保存，可通过以下命令恢复:`);
-    cliLog(`   tsx src/cli/index.ts --resume ${SESSION_ID}`);
-    cliLog(`   或 tsx src/cli/index.ts --r ${SESSION_ID}\n`);
-    rl.close();
-    process.exit(0);
+    const finish = (): void => {
+      saveEngineState(engine);
+      void mcpManager?.closeAll(); // 优雅断开 MCP 子进程（不阻塞退出）
+      cliLog(`\n\n📋 会话ID: ${SESSION_ID}`);
+      cliLog(`💾 状态已保存，可通过以下命令恢复:`);
+      // 用 `zqagent` 而不是开发期的 `tsx src/cli/index.ts`：这条提示是给最终用户看的，
+      // 他们装的是 npm 包/单文件，没有源码可跑 tsx。
+      cliLog(`   zqagent --resume ${SESSION_ID}`);
+      cliLog(`   或 zqagent --r ${SESSION_ID}\n`);
+      rl.close();
+      process.exit(0);
+    };
+    // 快照是异步的：给它最多 1s 落盘窗口（git 卡住时也不会退不出去）
+    const flush = vcsHook?.flush() ?? Promise.resolve();
+    void Promise.race([
+      flush,
+      new Promise<void>((resolve) => setTimeout(resolve, 1000)),
+    ]).then(finish, finish);
   };
   process.on("SIGINT", _exitHandler);
   process.on("SIGTERM", _exitHandler);
@@ -1552,6 +1943,7 @@ async function main() {
     const atMainPrompt =
       inputRouter.currentPrompt() === mainPrompt(engine).slice(1);
     const next = cycleMode(engine);
+    saveEngineState(engine);
     cliLog(`✅ 模式 → ${next} (${MODE_LABEL[next]})  [Tab 切换]`);
     if (atMainPrompt) inputRouter.refreshPrompt(mainPrompt(engine));
   });
@@ -1589,6 +1981,7 @@ async function main() {
         input.trim().toLowerCase() === "exit"
       ) {
         // 退出前保存会话状态（与 Ctrl+C 一致），可用 /sessions 或 --resume 恢复
+        await vcsHook?.flush(); // 等快照落盘，避免最后一次改动没被记录
         saveEngineState(engine);
         cliLog(`💾 会话状态已保存 (会话ID: ${SESSION_ID})`);
         cliLog("再见！");
@@ -1645,12 +2038,17 @@ async function main() {
             cliLog("  /agent rm <name> → 删除 agent");
             cliLog("  /agent show [name] → 查看 agent 详情");
             cliLog("  /mcp            → 列出 MCP 服务器");
-            cliLog("  /mcp add <name> stdio <cmd...>|http <url> → 添加");
+            cliLog("  /mcp add        → 交互式安装（模板/自定义/内置 OCR）");
+            cliLog("  /mcp add <name> stdio <cmd...>|http|sse <url> → 添加");
+            cliLog("  /mcp import [file] → 导入 Claude/Cursor 等配置");
             cliLog("  /mcp rm|enable|disable|refresh [name]");
             cliLog("  /tools          → 列出所有工具");
             cliLog("  /tool add <name> <cmd...> → 添加命令工具");
             cliLog("  /tool rm|disable|enable <name>");
             cliLog("  /clear          → 清空会话，重建引擎");
+            cliLog("  /vcs            → 查看变更追踪状态");
+            cliLog("  /changes [序号] → 列出本会话的文件改动 / 查看某轮 patch");
+            cliLog("  /restore <序号> [文件...] → 从快照恢复文件");
             cliLog("  /help /h        → 显示本帮助");
             cliLog("  quit / exit     → 退出");
             cliLog("  reset           → 重置会话");
@@ -1661,24 +2059,28 @@ async function main() {
           case "/plan":
           case "/p":
             engine.permissions.mode = Mode.PLAN;
+            saveEngineState(engine);
             cliLog(`✅ 模式 → plan (只读探索 + 计划提案)`);
             break;
 
           case "/interactive":
           case "/i":
             engine.permissions.mode = Mode.INTERACTIVE;
+            saveEngineState(engine);
             cliLog(`✅ 模式 → interactive (逐步审批)`);
             break;
 
           case "/auto":
           case "/a":
             engine.permissions.mode = Mode.AUTO;
+            saveEngineState(engine);
             cliLog(`✅ 模式 → auto (全自动，无需审批)`);
             break;
 
           case "/discuss":
           case "/d":
             engine.permissions.mode = Mode.DISCUSS;
+            saveEngineState(engine);
             cliLog(`✅ 模式 → discuss (只读对话)`);
             break;
 
@@ -1686,6 +2088,80 @@ async function main() {
           case "/m":
             cliLog(`📋 当前模式: ${engine.permissions.mode}`);
             break;
+
+          // ---- 变更追踪：查看 / 恢复本会话的快照 ----
+          case "/vcs": {
+            if (!sessionVcs || !sessionVcs.enabled) {
+              cliLog(`📋 变更追踪未启用（${resolveVcsPlan(WORKSPACE, { mode: PERM_CONFIG.vcs.mode }).reason}）`);
+              break;
+            }
+            const turns = await sessionVcs.listTurns();
+            cliLog(`📋 变更追踪: ${sessionVcs.plan.mode}｜快照 ${turns.length} 个`);
+            cliLog(`   ${sessionVcs.plan.reason}`);
+            if (vcsHook?.lastError) cliLog(`   ⚠️ 最近一次快照失败: ${vcsHook.lastError}`);
+            const last = turns[turns.length - 1];
+            if (last) {
+              cliLog(`   最近: #${last.turn} ${last.files.length} 个文件（${last.status}）`);
+            }
+            cliLog("   用 /changes 查看明细，/restore <序号> 恢复");
+            break;
+          }
+
+          case "/changes": {
+            if (!sessionVcs || !sessionVcs.enabled) {
+              cliLog("📋 变更追踪未启用");
+              break;
+            }
+            await vcsHook?.flush();
+            const turns = await sessionVcs.listTurns();
+            if (!turns.length) {
+              cliLog("📋 本会话还没有文件改动");
+              break;
+            }
+            // /changes [n]：查看第 n 个快照的 patch；不带参数则列出全部
+            const n = Number(arg);
+            if (Number.isFinite(n) && n > 0) {
+              const patch = await sessionVcs.diffTurn(n);
+              cliLog(patch.trim() ? patch.trimEnd() : `（快照 #${n} 无内容）`);
+              break;
+            }
+            for (const t of turns) {
+              const time = t.ts ? t.ts.replace("T", " ").slice(0, 19) : "";
+              cliLog(`  #${t.turn}  ${time}  ${t.status}  ${t.files.length} 个文件`);
+              for (const f of t.files.slice(0, 8)) cliLog(`      ${f}`);
+              if (t.files.length > 8) cliLog(`      … 另有 ${t.files.length - 8} 个`);
+            }
+            cliLog("  用 /changes <序号> 查看 patch，/restore <序号> [文件...] 恢复");
+            break;
+          }
+
+          case "/restore": {
+            if (!sessionVcs || !sessionVcs.enabled) {
+              cliLog("📋 变更追踪未启用");
+              break;
+            }
+            const rest = cmd.split(/\s+/).slice(1);
+            const n = Number(rest[0]);
+            if (!Number.isFinite(n) || n <= 0) {
+              cliLog("用法: /restore <快照序号> [文件...]（省略文件则恢复该轮全部）");
+              break;
+            }
+            await vcsHook?.flush();
+            const paths = rest.slice(1);
+            const result = await sessionVcs.restoreTurn(n, paths.length ? { paths } : {});
+            if (result.restored.length) {
+              cliLog(`✅ 已恢复 ${result.restored.length} 个文件: ${result.restored.join(", ")}`);
+            }
+            if (result.overwritten.length) {
+              cliLog(`   ⚠️ 其中 ${result.overwritten.length} 个覆盖了现有改动: ${result.overwritten.join(", ")}`);
+            }
+            const missing = result.missing ?? [];
+            if (missing.length) {
+              cliLog(`   ℹ️ 该快照里没有: ${missing.join(", ")}`);
+            }
+            if (!result.restored.length) cliLog("（没有文件被恢复）");
+            break;
+          }
 
           case "/model":
             if (arg) {
@@ -1772,9 +2248,13 @@ async function main() {
               cliLog(`       ${p.baseURL || "默认端点"}`);
               const cfg = loadConnectionById(p.id);
               if (!cfg) continue;
-              const result = await fetchModels(cfg.baseURL, cfg.apiKey, p.model);
+              const diag = await fetchModelsWithDiagnostics(cfg.baseURL, cfg.apiKey, p.model);
+              const result = diag.result;
               if (!result || result.models.length === 0) {
-                cliLog("       ⚠️  未能获取模型列表（/models 接口不可用或 Key 无效）");
+                cliLog(`       ⚠️  未能获取模型列表`);
+                for (const line of describeModelFetchFailure(cfg.baseURL, diag).split("\n")) {
+                  cliLog(`       ${line}`);
+                }
                 continue;
               }
               // 顺带落盘上下文长度：引擎下次装配即按真实窗口计算压缩阈值
@@ -1830,6 +2310,13 @@ async function main() {
               : list.find((p) => p.id === arg);
             if (!target) {
               cliLog(`❌ 未找到供应商: ${arg}`);
+              break;
+            }
+            if (target.id === BUILTIN_PROVIDER_ID) {
+              cliLog(
+                "❌ 平台内置模型不可删除（接入 Hub 后自动配置，Key 由平台托管）。\n" +
+                  "   如需改用其它模型：/connect 选择或添加供应商后设为默认。",
+              );
               break;
             }
             if (removeConnection(target.id)) {
@@ -1898,6 +2385,8 @@ async function main() {
               break;
             }
             SESSION_ID = target.sessionId;
+            // 切会话前先把上一会话的待落盘快照写完
+            await vcsHook?.flush();
             engine = buildEngine(SESSION_ID, savedState);
             // 重建目标会话的命名元数据（name/nameSource/taskCount）
             sessionMeta = {
@@ -2118,26 +2607,43 @@ async function main() {
             // 无子命令 / list：列出全部 MCP 服务器
             if (!sub || sub === "list" || sub === "ls") {
               const configs = mcpManager!.listConfigs();
-              cliLog(`\n📡 MCP Servers (${configs.length} 个):`);
+              const lazy = mcpManager!.isLazyActive();
+              cliLog(
+                `\n📡 MCP Servers (${configs.length} 个${lazy ? "，按需加载已启用" : ""}):`,
+              );
               for (const cfg of configs) {
                 const state = mcpManager!.isConnected(cfg.name)
                   ? "🟢 已连接"
                   : cfg.enabled === false
                     ? "⚪ 已禁用"
                     : "🔴 未连接";
-                const tools = mcpManager!.serverToolKeys(cfg.name).length;
+                const total = mcpManager!.serverToolTotal(cfg.name);
+                const loaded = mcpManager!.serverToolKeys(cfg.name).length;
+                const tools =
+                  lazy && total > 0
+                    ? `工具×${loaded}/${total}`
+                    : `工具×${loaded}`;
+                const typeLabel =
+                  cfg.type === "builtin"
+                    ? `builtin:${cfg.builtin ?? cfg.name}`
+                    : cfg.type;
                 const target =
                   cfg.type === "stdio"
                     ? (cfg.command ?? []).join(" ")
-                    : cfg.url;
+                    : cfg.type === "builtin"
+                      ? "进程内内置服务器"
+                      : cfg.url;
                 cliLog(
-                  `  ${cfg.name} [${cfg.type}] ${state} 工具×${tools}`,
+                  `  ${cfg.name} [${typeLabel}] ${state} ${tools}`,
                 );
                 cliLog(`    ${target}`);
               }
               if (configs.length === 0) {
+                cliLog("  暂无配置（/mcp add 交互式安装）");
+              }
+              if (lazy) {
                 cliLog(
-                  "  暂无配置（/mcp add <name> stdio <cmd...> 添加）",
+                  "  ℹ️  工具较多：模型会先用 mcp_search_tools 检索，再按需加载",
                 );
               }
               cliLog("");
@@ -2146,10 +2652,14 @@ async function main() {
 
             // 添加：/mcp add <name> stdio <cmd...> | /mcp add <name> http <url>
             if (sub === "add") {
+              // 无参数 → 交互式安装向导
+              if (!name) {
+                await mcpAddWizard();
+                break;
+              }
               const type = (parts[3] ?? "").toLowerCase();
-              if (!name || (type !== "stdio" && type !== "http")) {
-                cliLog("用法: /mcp add <name> stdio <command...>");
-                cliLog("      /mcp add <name> http <url>");
+              if (type !== "stdio" && type !== "http" && type !== "sse") {
+                printMcpAddUsage();
                 break;
               }
               const config: McpServerConfig =
@@ -2160,12 +2670,17 @@ async function main() {
                       command: parts.slice(4),
                       enabled: true,
                     }
-                  : { name, type: "http", url: parts[4], enabled: true };
+                  : {
+                      name,
+                      type: type === "sse" ? "sse" : "http",
+                      url: parts[4],
+                      enabled: true,
+                    };
               if (type === "stdio" && !(config.command ?? []).length) {
                 cliLog("❌ 缺少启动命令");
                 break;
               }
-              if (type === "http" && !config.url) {
+              if (type !== "stdio" && !config.url) {
                 cliLog("❌ 缺少 URL");
                 break;
               }
@@ -2180,6 +2695,12 @@ async function main() {
                 cliLog(`⚠️  配置已保存，但连接失败: ${err}`);
                 cliLog(`   可用 /mcp refresh ${name} 重试`);
               }
+              break;
+            }
+
+            // 导入：/mcp import [file]
+            if (sub === "import") {
+              await mcpImportCommand(parts[2]);
               break;
             }
 
@@ -2232,7 +2753,9 @@ async function main() {
               break;
             }
 
-            cliLog("用法: /mcp [list|add|rm|enable|disable|refresh]");
+            cliLog(
+              "用法: /mcp [list|add|import|rm|enable|disable|refresh]",
+            );
             break;
           }
 
@@ -2334,7 +2857,12 @@ async function main() {
           case "/link": {
             const code = parts[1];
             const hub = parts[2] ?? process.env.HUB_URL;
-            if (!code || !hub) {
+            // 不带接入码：进入账号接入向导（Hub 地址 + 邮箱/手机号 + 密码/短信验证码）
+            if (!code) {
+              await runLinkCommand([], { rl, interactive: true });
+              break;
+            }
+            if (!hub) {
               cliLog("用法: /link <注册码> [Hub地址]（Hub地址也可由 HUB_URL 环境变量提供）");
               break;
             }

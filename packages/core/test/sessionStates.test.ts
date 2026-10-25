@@ -45,6 +45,8 @@ describe("allSessionStates", () => {
       name: null,
       status: "idle",
       lastUserMessage: null,
+      // 任务请求开始时间：工作台排序键（未发起过任务时为 null）
+      lastStartedAt: null,
       lastCompletedAt: null,
     });
     expect(out.find((s) => s.sessionId === b.sessionId)!.projectId).toBe("t2");
@@ -53,6 +55,7 @@ describe("allSessionStates", () => {
     for (const s of out) {
       expect(Object.keys(s).sort()).toEqual([
         "lastCompletedAt",
+        "lastStartedAt",
         "lastUserMessage",
         "name",
         "projectId",
@@ -63,7 +66,7 @@ describe("allSessionStates", () => {
     }
   });
 
-  it("带出最后一条用户消息与最后完成时间（长消息截断）", async () => {
+  it("带出最后一条用户消息与最近任务时间（长消息截断）", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "zqagent-states-last-"));
     const store = new Store(root);
     const manager = new SessionManager(store, 60_000);
@@ -77,11 +80,14 @@ describe("allSessionStates", () => {
     await store.saveSession({
       ...rec,
       lastInput: "把登录页的错误提示统一一下",
+      lastStartedAt: "2026-10-17T03:59:00.000Z",
       lastCompletedAt: "2026-10-17T04:00:00.000Z",
     });
 
     const s = allSessionStates(store, manager).find((x) => x.sessionId === a.sessionId)!;
     expect(s.lastUserMessage).toBe("把登录页的错误提示统一一下");
+    // 工作台排序键：任务请求的开始时间，与完成时间各自独立
+    expect(s.lastStartedAt).toBe("2026-10-17T03:59:00.000Z");
     expect(s.lastCompletedAt).toBe("2026-10-17T04:00:00.000Z");
 
     // 超长消息截断，避免快照体积随对话膨胀
@@ -181,6 +187,7 @@ describe("allSessionStates", () => {
           name: null,
           status: "idle",
           lastUserMessage: null,
+          lastStartedAt: null,
           lastCompletedAt: null,
         },
       ]);

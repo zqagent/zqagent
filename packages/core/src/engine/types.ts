@@ -6,6 +6,8 @@
  * 对话消息以及 OpenAI 工具 Schema。
  */
 
+import type { MessageAttachment, StoredAttachment } from "./attachments.js";
+
 /** LLM 请求的工具调用 */
 export interface ToolCall {
   /** 工具调用 ID（OpenAI 格式，用于把 tool 结果消息关联回对应的调用） */
@@ -72,6 +74,20 @@ export interface Message {
   role: "system" | "user" | "assistant" | "tool" | "notice";
   /** 消息正文 */
   content: string;
+  /**
+   * 用户消息的附件（图片/音频/视频，base64 data URL）。
+   *
+   * 仅在产生它的这一轮里发给模型：`_finalizeOutbound` 会剥离历史轮次的附件，
+   * 落盘前也会被 `stripAttachments` 去掉（见 `engine/attachments.ts`）。
+   */
+  attachments?: MessageAttachment[];
+  /**
+   * 同一批附件的落盘引用（轻量，会随消息一起落盘）。
+   *
+   * 控制台用它在用户消息上方渲染缩略图、在聊天详情里回看；字节本体存在
+   * `sessions/<id>/attachments/` 下。
+   */
+  attachmentRefs?: StoredAttachment[];
   // display-only sidecar 字段：仅用于界面展示，发送给模型前会被剥离
   /** 附加来源信息（展示用） */
   source?: Record<string, unknown>;

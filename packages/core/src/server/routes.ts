@@ -11,6 +11,7 @@ import * as path from "path";
 import { ApprovalOutcome } from "../engine/events.js";
 import { SecretBox } from "../crypto/secrets.js";
 import { Store, newId } from "./store.js";
+import type { SelfUpdater } from "./fleet/FleetCommands.js";
 import {
   allProjectSummaries,
   allSessionStates,
@@ -22,6 +23,11 @@ import {
 } from "./projects.js";
 import { SessionManager, ApiError } from "./session.js";
 import {
+  AttachmentError,
+  normalizeAttachments,
+  type MessageAttachment,
+} from "../engine/attachments.js";
+import {
   authenticate,
   extractApiKey,
   extractProjectId,
@@ -30,17 +36,33 @@ import {
 import { setupServerHandlers } from "./interact.js";
 import { handleHubProxy, hubProxyEnabled, isHubProxyPath } from "./hubProxy.js";
 import { applyNodeLlmPatch, findNodeProvider, nodeLlmView } from "./nodeLlm.js";
-import { hasServerMcpConfig } from "./mcpConfig.js";
+import { ensureBuiltinProvider, fetchLlmBalance } from "./builtinLlm.js";
+import {
+  hasServerMcpConfig,
+  inspectServerMcpConfigs,
+  McpConfigError,
+  saveServerMcpConfigs,
+  testServerMcpConfig,
+} from "./mcpConfig.js";
 import { fetchModels } from "../providers/models.js";
+import {
+  describeModelFetchFailure,
+  fetchModelsWithDiagnostics,
+} from "../providers/models.js";
 import { listDirs, searchDirs, makeDirIn } from "./fsBrowser.js";
 import {
   listProjectFiles,
   readProjectFile,
   downloadProjectFile,
   writeProjectFile,
+  writeProjectFileBase64,
   createProjectDir,
   createProjectFile,
+  deleteProjectPaths,
   searchProjectFiles,
+  renameProjectPath,
+  moveProjectPaths,
+  zipProjectPaths,
 } from "./projectFiles.js";
 import {
   runProjectCommand,
@@ -62,7 +84,6 @@ import {
 import { generateGitCommitMessage } from "./gitCommitMessage.js";
 import { listShellTasks, killShellTask } from "../tools/shell.js";
 import { buildToolCatalog } from "./toolsCatalog.js";
-import { loadServerMcpConfigs } from "./mcpConfig.js";
 import { projectStats } from "./projectStats.js";
 import { buildNodeHost } from "./nodeHost.js";
 import type { NotificationHub } from "./notify/NotificationHub.js";
@@ -104,8 +125,13 @@ interface Route {
 
 const API_PREFIX = "/api/v1";
 
-/** 请求体大小上限（10MB），防止恶意大 payload 拖垮进程 */
-const MAX_BODY_BYTES = 10 * 1024 * 1024;
+/**
+ * 请求体大小上限（24MB）。
+ *
+ * 主要留给聊天附件：单次最多 10MB 原文件，base64 后约 13.4MB，再加 JSON 包装
+ * 与文本仍有充足余量。附件本身不落盘，见 `engine/attachments.ts`。
+ */
+const MAX_BODY_BYTES = 24 * 1024 * 1024;
 
 function readBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -130,6 +156,21 @@ function readBody(req: IncomingMessage): Promise<unknown> {
     });
     req.on("error", reject);
   });
+}
+
+/**
+ * 解析请求体里的附件；格式不合法 → 400（而不是 500）。
+ *
+ * 附件字节不进会话历史，只在这一次请求里内联给供应商（见 engine/attachments.ts）。
+ */
+function readAttachments(body: unknown): MessageAttachment[] | undefined {
+  const raw = (body as { attachments?: unknown } | undefined)?.attachments;
+  try {
+    return normalizeAttachments(raw);
+  } catch (e) {
+    if (e instanceof AttachmentError) throw new ApiError(400, "bad_request", e.message);
+    throw e;
+  }
 }
 
 function json(res: ServerResponse, status: number, payload: unknown): void {
@@ -242,9 +283,12 @@ export function createApp(
       fleetSecret: string;
       nodeId: string;
     } | null;
+    /** 自更新控制器（/node/self-update 用；缺省时该接口报不可用） */
+    updater?: SelfUpdater | null;
   } = {},
 ) {
   setupServerHandlers(manager);
+  const updater = opts.updater ?? null;
 
   const routes: Route[] = [
     // ---------- 会话管理 ----------
@@ -353,9 +397,11 @@ export function createApp(
         const input = String(
           (body as { input?: unknown } | undefined)?.input ?? "",
         );
-        if (!input.trim())
+        const attachments = readAttachments(body);
+        // 允许纯附件（只发一张图、不写字）：有附件就不要求文本非空
+        if (!input.trim() && !attachments?.length)
           throw new ApiError(400, "bad_request", "input 不能为空");
-        const result = manager.submitOrSteer(tenant, params["id"]!, input);
+        const result = manager.submitOrSteer(tenant, params["id"]!, input, attachments);
         ok(res, {
           accepted: true,
           status: result === "steered" ? "steering" : "running",
@@ -377,10 +423,22 @@ export function createApp(
         const text = String(
           (body as { text?: unknown } | undefined)?.text ?? "",
         );
-        if (!text.trim())
+        const attachments = readAttachments(body);
+        if (!text.trim() && !attachments?.length)
           throw new ApiError(400, "bad_request", "text 不能为空");
-        manager.steer(tenant, params["id"]!, text);
+        manager.steer(tenant, params["id"]!, text, attachments);
         ok(res, { accepted: true });
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["sessions", ":id", "steer", "remove"], // 撤销未注入的补充信息
+      fn: (_req, res, { tenant, params, body }) => {
+        const index = Number((body as { index?: unknown } | undefined)?.index);
+        if (!Number.isInteger(index))
+          throw new ApiError(400, "bad_request", "index 必须是整数");
+        const pendingSteers = manager.unsteer(tenant, params["id"]!, index);
+        ok(res, { accepted: true, pendingSteers });
       },
     },
     {
@@ -442,6 +500,52 @@ export function createApp(
       },
     },
 
+    // ---------- 变更追踪（多会话并行的改动审计与恢复） ----------
+    // 列出本会话的快照（每轮一个）。追踪关闭时不报错，回 enabled=false，
+    // 控制台据此显示「未启用」，而不是弹错误。
+    {
+      method: "GET",
+      pattern: ["sessions", ":id", "changes"],
+      fn: async (_req, res, { tenant, params }) => {
+        ok(res, await manager.sessionChanges(tenant.id, params["id"]!));
+      },
+    },
+    // 某个快照的完整 patch（点开某一轮查看）
+    {
+      method: "GET",
+      pattern: ["sessions", ":id", "changes", ":turn"],
+      fn: async (_req, res, { tenant, params }) => {
+        ok(
+          res,
+          await manager.sessionChangeDiff(
+            tenant.id,
+            params["id"]!,
+            Number(params["turn"]),
+          ),
+        );
+      },
+    },
+    // 从快照恢复文件（会改工作区，只由用户在面板上显式触发）
+    {
+      method: "POST",
+      pattern: ["sessions", ":id", "changes", ":turn", "restore"],
+      fn: async (_req, res, { tenant, params, body }) => {
+        const raw = (body ?? {}) as { paths?: unknown };
+        const paths = Array.isArray(raw.paths)
+          ? raw.paths.map((p) => String(p ?? "")).filter((p) => p.length > 0)
+          : [];
+        ok(
+          res,
+          await manager.sessionChangeRestore(
+            tenant.id,
+            params["id"]!,
+            Number(params["turn"]),
+            { paths },
+          ),
+        );
+      },
+    },
+
     // 云端接入配对：管理员获取网关地址 + 命名空间/密钥 + 本节点 ID。
     // 「去 EMQX」后控制台不再直连 broker，而是由控制面签发终端令牌后直连网关。
     {
@@ -472,7 +576,25 @@ export function createApp(
         ok(res, opts.fleet.status());
       },
     },
-    // 运行时热接入：凭一次性注册码接入 Hub（落盘 fleet.json + 立即连接，免重启）
+    // 修改本机节点显示名：写本地配置并立即上报；已接入 Hub 时同步 Hub 记录。
+    // `zqagent rename` 在有 server 在跑时走这里（热生效，免重启）。
+    {
+      method: "POST",
+      pattern: ["fleet", "label"],
+      adminOnly: true,
+      fn: async (_req, res, { body }) => {
+        if (!opts.fleet) {
+          throw new ApiError(503, "fleet_disabled", "节点管理控制器未启用");
+        }
+        const raw = (body ?? {}) as { label?: unknown };
+        const label = typeof raw.label === "string" ? raw.label.trim() : "";
+        if (!label) {
+          throw new ApiError(400, "bad_request", "label 不能为空");
+        }
+        ok(res, await opts.fleet.rename(label));
+      },
+    },
+    // 运行时热接入：凭一次性注册码或 Hub 账号接入（落盘 fleet.json + 立即连接，免重启）
     {
       method: "POST",
       pattern: ["fleet", "enroll"],
@@ -484,31 +606,77 @@ export function createApp(
         const raw = (body ?? {}) as {
           hubUrl?: unknown;
           code?: unknown;
+          /** 已登录的 Hub 令牌（桌面端登录后自动接入用） */
+          hubToken?: unknown;
+          email?: unknown;
+          phone?: unknown;
+          password?: unknown;
+          smsCode?: unknown;
           label?: unknown;
         };
         const hubUrl = String(raw.hubUrl ?? "")
           .trim()
           .replace(/\/$/, "");
         const code = String(raw.code ?? "").trim();
-        if (!hubUrl || !code) {
-          throw new ApiError(400, "bad_request", "hubUrl 与 code 必填");
+        const hubToken = String(raw.hubToken ?? "").trim();
+        const email = String(raw.email ?? "").trim();
+        const phone = String(raw.phone ?? "").trim();
+        const password = String(raw.password ?? "");
+        const smsCode = String(raw.smsCode ?? "").trim();
+        const hasAccount = Boolean(email || phone);
+        if (!hubUrl) {
+          throw new ApiError(400, "bad_request", "hubUrl 必填");
+        }
+        const modes = [Boolean(code), Boolean(hubToken), hasAccount].filter(Boolean).length;
+        if (modes > 1) {
+          throw new ApiError(400, "bad_request", "code / hubToken / 账号凭据只能三选一");
+        }
+        if (modes === 0) {
+          throw new ApiError(
+            400,
+            "bad_request",
+            "需要 code、hubToken，或 email/phone + password/smsCode",
+          );
+        }
+        if (hasAccount && !password && !smsCode) {
+          throw new ApiError(400, "bad_request", "账号接入需要 password 或 smsCode");
         }
         const label =
           typeof raw.label === "string" ? raw.label.trim() : undefined;
         try {
-          ok(res, await opts.fleet.enroll({ hubUrl, code, label }));
+          ok(
+            res,
+            await opts.fleet.enroll({
+              hubUrl,
+              code: code || undefined,
+              hubToken: hubToken || undefined,
+              account: hasAccount
+                ? {
+                    email: email || undefined,
+                    phone: phone || undefined,
+                    password: password || undefined,
+                    smsCode: smsCode || undefined,
+                  }
+                : undefined,
+              label,
+            }),
+          );
         } catch (e) {
           const code2 = (e as { code?: string }).code;
           const status =
             code2 === "code_expired"
               ? 410
-              : code2 === "code_used" || code2 === "node_taken"
-                ? 409
-                : code2 === "not_found"
-                  ? 404
-                  : code2 === "plan_limit" || code2 === "subscription_required"
-                    ? 402
-                    : 400;
+              : code2 === "unauthorized"
+                ? 401
+                : code2 === "account_disabled"
+                  ? 403
+                  : code2 === "code_used" || code2 === "node_taken"
+                    ? 409
+                    : code2 === "not_found"
+                      ? 404
+                      : code2 === "plan_limit" || code2 === "subscription_required"
+                        ? 402
+                        : 400;
           const msg = e instanceof Error ? e.message : String(e);
           throw new ApiError(
             status,
@@ -916,6 +1084,30 @@ export function createApp(
         }
       },
     },
+    {
+      // 二进制写入（图片编辑保存）：body = { path, base64 }
+      method: "POST",
+      pattern: ["files", "binary"],
+      fn: (_req, res, { tenant, body }) => {
+        const raw = (body ?? {}) as { path?: unknown; base64?: unknown };
+        try {
+          ok(
+            res,
+            writeProjectFileBase64(
+              tenant.workspaceRoot ?? null,
+              String(raw.path ?? ""),
+              String(raw.base64 ?? ""),
+            ),
+          );
+        } catch (e) {
+          throw new ApiError(
+            400,
+            "bad_request",
+            e instanceof Error ? e.message : String(e),
+          );
+        }
+      },
+    },
 
     // ---------- 项目终端（在工作区执行命令） ----------
     {
@@ -1215,7 +1407,7 @@ export function createApp(
       },
     },
 
-    // ---------- 当前项目可用工具 / MCP（配置页展示，只读） ----------
+    // ---------- 当前项目可用工具 / MCP（配置页展示与维护） ----------
     {
       method: "GET",
       pattern: ["tools"],
@@ -1227,15 +1419,40 @@ export function createApp(
       method: "GET",
       pattern: ["mcp"],
       fn: (_req, res, { tenant }) => {
-        ok(
-          res,
-          loadServerMcpConfigs(tenant).map((m) => ({
-            name: m.name,
-            type: m.type,
-            url: m.type === "http" ? m.url : undefined,
-            command: m.type === "stdio" ? (m.command ?? []).join(" ") : undefined,
-          })),
-        );
+        ok(res, inspectServerMcpConfigs(tenant).items);
+      },
+    },
+    // 整体替换当前项目的 MCP 配置（写入 <workspace>/.agent/mcp.json）。
+    // 环境变量 / 租户下发的配置由平台接管，返回 409 且不落盘。
+    {
+      method: "PUT",
+      pattern: ["mcp"],
+      fn: (_req, res, { tenant, body }) => {
+        const raw = (body ?? {}) as { servers?: unknown };
+        if (!Array.isArray(raw.servers)) {
+          throw new ApiError(400, "bad_request", "servers 必须是数组");
+        }
+        try {
+          const next = saveServerMcpConfigs(tenant, raw.servers);
+          ok(res, next.items);
+        } catch (err) {
+          if (err instanceof McpConfigError) {
+            throw new ApiError(err.status, err.code, err.message);
+          }
+          throw err;
+        }
+      },
+    },
+    // 连接测试（不落盘）：临时连接一次并返回工具列表，供设置页「测试」按钮使用
+    {
+      method: "POST",
+      pattern: ["mcp", "test"],
+      fn: async (_req, res, { tenant, body }) => {
+        const raw = (body ?? {}) as { server?: unknown };
+        if (!raw.server || typeof raw.server !== "object") {
+          throw new ApiError(400, "bad_request", "server 必须是对象");
+        }
+        ok(res, await testServerMcpConfig(tenant, raw.server));
       },
     },
 
@@ -1275,6 +1492,20 @@ export function createApp(
     },
     {
       method: "POST",
+      pattern: ["files", "delete"], // 删除文件 / 目录（目录递归）；逐条返回失败原因
+      fn: (_req, res, { tenant, body }) => {
+        const raw = (body ?? {}) as { paths?: unknown };
+        const paths = Array.isArray(raw.paths) ? raw.paths.map((x) => String(x)) : [];
+        if (paths.length === 0) throw new ApiError(400, "bad_request", "paths 不能为空");
+        try {
+          ok(res, deleteProjectPaths(tenant.workspaceRoot ?? null, paths));
+        } catch (e) {
+          throw new ApiError(400, "bad_request", e instanceof Error ? e.message : String(e));
+        }
+      },
+    },
+    {
+      method: "POST",
       pattern: ["files", "create"],
       fn: (_req, res, { tenant, body }) => {
         const raw = (body ?? {}) as { path?: unknown; content?: unknown };
@@ -1287,6 +1518,53 @@ export function createApp(
               String(raw.content ?? ""),
             ),
           );
+        } catch (e) {
+          throw new ApiError(400, "bad_request", e instanceof Error ? e.message : String(e));
+        }
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["files", "rename"], // 重命名（只改同目录下的名字）
+      fn: (_req, res, { tenant, body }) => {
+        const raw = (body ?? {}) as { path?: unknown; name?: unknown };
+        try {
+          ok(
+            res,
+            renameProjectPath(
+              tenant.workspaceRoot ?? null,
+              String(raw.path ?? ""),
+              String(raw.name ?? ""),
+            ),
+          );
+        } catch (e) {
+          throw new ApiError(400, "bad_request", e instanceof Error ? e.message : String(e));
+        }
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["files", "move"], // 移动到目标目录（拖拽移动；不覆盖同名条目）
+      fn: (_req, res, { tenant, body }) => {
+        const raw = (body ?? {}) as { paths?: unknown; dest?: unknown };
+        const paths = Array.isArray(raw.paths) ? raw.paths.map((x) => String(x)) : [];
+        if (paths.length === 0) throw new ApiError(400, "bad_request", "paths 不能为空");
+        try {
+          ok(res, moveProjectPaths(tenant.workspaceRoot ?? null, paths, String(raw.dest ?? "")));
+        } catch (e) {
+          throw new ApiError(400, "bad_request", e instanceof Error ? e.message : String(e));
+        }
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["files", "zip"], // 压缩下载（多选一起打包；超上限由实现拒绝）
+      fn: (_req, res, { tenant, body }) => {
+        const raw = (body ?? {}) as { paths?: unknown };
+        const paths = Array.isArray(raw.paths) ? raw.paths.map((x) => String(x)) : [];
+        if (paths.length === 0) throw new ApiError(400, "bad_request", "paths 不能为空");
+        try {
+          ok(res, zipProjectPaths(tenant.workspaceRoot ?? null, paths));
         } catch (e) {
           throw new ApiError(400, "bad_request", e instanceof Error ? e.message : String(e));
         }
@@ -1351,6 +1629,29 @@ export function createApp(
         );
         store.saveNodeLlm(next);
         ok(res, nodeLlmView(next));
+      },
+    },
+    // 大模型账户余额（控制台「余额不足 → 查看余额并充值」用；由节点向 Hub 代查）
+    {
+      method: "GET",
+      pattern: ["node", "llm", "balance"],
+      adminOnly: true,
+      fn: async (_req, res) => {
+        ok(res, await fetchLlmBalance(store));
+      },
+    },
+    // 重新拉取平台内置模型凭据（用户点了「刷新内置模型」，或 Key 在控制台被重置）
+    {
+      method: "POST",
+      pattern: ["node", "llm", "builtin-refresh"],
+      adminOnly: true,
+      fn: async (_req, res) => {
+        const r = await ensureBuiltinProvider(store, { force: true });
+        if (r.status !== "ready") {
+          ok(res, { ok: false, reason: r.reason });
+          return;
+        }
+        ok(res, { ok: true, view: nodeLlmView(store.loadNodeLlm()) });
       },
     },
 
@@ -1493,20 +1794,60 @@ export function createApp(
         if (!baseURL) throw new ApiError(400, "bad_request", "缺少 Base URL");
         if (!apiKey) throw new ApiError(400, "bad_request", "缺少 API Key");
         try {
-          const r = await fetchModels(baseURL, apiKey, picked?.model);
+          // 多家供应商的模型列表路径不统一：按候选组合逐个尝试，
+          // 全部失败时把「试过哪些 URL、各自为什么失败」回给界面
+          const diag = await fetchModelsWithDiagnostics(baseURL, apiKey, picked?.model);
+          if (!diag.result?.models.length) {
+            throw new ApiError(
+              diag.authFailed ? 401 : 400,
+              diag.authFailed ? "auth_failed" : "models_unavailable",
+              describeModelFetchFailure(baseURL, diag),
+            );
+          }
+          const r = diag.result;
           ok(res, {
-            models: r?.models ?? [],
-            endpoint: r?.endpoint ?? "",
-            nonChat: r?.nonChat ?? [],
-            modelMeta: r?.modelMeta ?? [],
+            models: r.models,
+            endpoint: r.endpoint,
+            nonChat: r.nonChat,
+            modelMeta: r.modelMeta ?? [],
           });
         } catch (e) {
+          if (e instanceof ApiError) throw e;
           throw new ApiError(
             400,
             "bad_request",
             e instanceof Error ? e.message : String(e),
           );
         }
+      },
+    },
+
+    // ---------- 节点自更新（状态 / 检查 / 安装） ----------
+    // action=install 先回执、后台安装并退出进程（由服务管理器拉起新版本），
+    // 因此回执成功只代表「已受理」，是否升级成功要用 action=status 再确认。
+    {
+      method: "POST",
+      pattern: ["node", "self-update"],
+      projectOptional: true,
+      fn: async (req, res, { body }) => {
+        const b = (body ?? {}) as { action?: unknown; force?: unknown };
+        const action = String(b.action ?? "status");
+        if (!updater) {
+          throw new ApiError(400, "bad_request", "自更新不可用：节点未以 serve 模式运行");
+        }
+        if (action === "status") {
+          ok(res, updater.status());
+          return;
+        }
+        if (action === "check") {
+          ok(res, await updater.inspect());
+          return;
+        }
+        if (action === "install") {
+          ok(res, await updater.requestInstall(b.force === true));
+          return;
+        }
+        throw new ApiError(400, "bad_request", `未知的 action：${action}（可选 status / check / install）`);
       },
     },
 
@@ -1695,15 +2036,56 @@ export function createApp(
           );
           return;
         }
-        const since = Number(
-          new URL(req.url!, "http://localhost").searchParams.get("since") ?? 0,
+        // since：向后增量；before：向前翻页；maxBytes：单次回执字节预算
+        const q = new URL(req.url!, "http://localhost").searchParams;
+        const sinceRaw = q.get("since");
+        const beforeRaw = q.get("before");
+        const maxBytesRaw = q.get("maxBytes");
+        ok(
+          res,
+          manager.eventsPage(tenant.id, params["id"]!, {
+            since: sinceRaw === null ? undefined : Number(sinceRaw) || 0,
+            before: beforeRaw === null ? undefined : Number(beforeRaw) || 0,
+            maxBytes: maxBytesRaw === null ? undefined : Number(maxBytesRaw) || undefined,
+          }),
         );
-        const { events, latestSeq } = manager.eventsSince(
-          tenant.id,
-          params["id"]!,
-          since,
+      },
+    },
+    {
+      method: "GET",
+      pattern: ["sessions", ":id", "turns"], // 轮次汇总（会话详情的列表）
+      fn: async (req, res, { tenant, params }) => {
+        const q = new URL(req.url!, "http://localhost").searchParams;
+        const beforeRaw = q.get("before");
+        const limitRaw = q.get("limit");
+        ok(
+          res,
+          await manager.sessionTurns(tenant.id, params["id"]!, {
+            before: beforeRaw === null ? undefined : Number(beforeRaw) || 0,
+            limit: limitRaw === null ? undefined : Number(limitRaw) || undefined,
+          }),
         );
-        ok(res, { events, latestSeq });
+      },
+    },
+    {
+      method: "GET",
+      // 聊天记录里的附件（用户消息的图片 / 文件）；path 相对会话目录，如 attachments/xx.png
+      pattern: ["sessions", ":id", "attachments"],
+      fn: (req, res, { tenant, params }) => {
+        const q = new URL(req.url!, "http://localhost").searchParams;
+        ok(res, manager.sessionAttachment(tenant.id, params["id"]!, q.get("path") ?? ""));
+      },
+    },
+    {
+      method: "GET",
+      // 单轮详情：用户消息（含补充） + 最终回复 + 产出文件
+      pattern: ["sessions", ":id", "turns", ":seq", "reply"],
+      fn: async (req, res, { tenant, params }) => {
+        const startSeq = Number(params["seq"]);
+        if (!Number.isFinite(startSeq) || startSeq <= 0) {
+          throw new ApiError(400, "bad_request", "无效的轮次序号");
+        }
+        ok(res, await manager.sessionTurnReply(tenant.id, params["id"]!, startSeq));
       },
     },
   ];

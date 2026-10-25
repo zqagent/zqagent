@@ -7,10 +7,10 @@
 🌐 **官网与使用文档：[agent.cd-zq.com](https://agent.cd-zq.com/)**
 
 [![Website](https://img.shields.io/badge/%E5%AE%98%E7%BD%91-agent.cd--zq.com-4f46e5)](https://agent.cd-zq.com/)
-[![CI](https://github.com/zqagent/zqagent/actions/workflows/ci.yml/badge.svg)](https://github.com/zqagent/zqagent/actions/workflows/ci.yml)
+[![CI](https://github.com/zqagent/zqagent.git/actions/workflows/ci.yml/badge.svg)](https://github.com/zqagent/zqagent.git/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.17-brightgreen.svg)](https://nodejs.org/)
-[![Stars](https://img.shields.io/github/stars/zqagent/zqagent?style=social)](https://github.com/zqagent/zqagent)
+[![Stars](https://img.shields.io/github/stars/zqagent/zqagent.git?style=social)](https://github.com/zqagent/zqagent.git)
 [![npm](https://img.shields.io/npm/v/@zqagent/core?label=npm&color=4f46e5)](https://www.npmjs.com/package/@zqagent/core)
 
 ![zqagent 演示：读文件 → 弹审批 → 跑测试](./docs/assets/demo.gif)
@@ -151,6 +151,17 @@ ZQAgent 的前提是**模型输出不可信**：
 [server-api](./docs/en/server-api.md) · [shared](./docs/en/shared.md) ·
 [context-compaction](./docs/en/context-compaction.md) ·
 [llm-connection](./docs/en/llm-connection-troubleshooting.md)
+
+## 交流
+
+用户群（微信群）：扫码加入，提问、报 Bug、提需求都行，不用加好友。
+群满会自动切换到新群，同一个码长期有效。
+
+<img src="https://agent.cd-zq.com/wecom-group.png" alt="ZQAgent 用户群二维码" width="200" />
+
+站点上的说明与群规：<https://agent.cd-zq.com/community/>
+
+不想用微信：到 [GitHub Issues](https://github.com/zqagent/zqagent.git/issues) 提问。
 
 ## 开发
 

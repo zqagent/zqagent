@@ -8,10 +8,8 @@ import * as path from "path";
 import type { SessionStateEntry } from "@zqagent/shared/fleet";
 import { Store, newId, generateApiKey } from "./store.js";
 import { ApiError, LAST_USER_MESSAGE_MAX, type SessionManager } from "./session.js";
-import { nodeDefaultProvider, normalizeModelList, normalizeModelMeta } from "./nodeLlm.js";
+import { defaultTenantModel, nodeDefaultProvider, normalizeModelList, normalizeModelMeta } from "./nodeLlm.js";
 import type { LlmProviderEntry, NodeInfo, ProjectSummary, TenantConfig } from "./types.js";
-const DEFAULT_MODEL = () =>
-  process.env.OPENAI_MODEL || process.env.MODEL || "gpt-4o";
 
 /** 租户 → 项目摘要（不含 apiKey 明文） */
 export function toProjectSummary(store: Store, tenant: TenantConfig): ProjectSummary {
@@ -179,6 +177,7 @@ export function allSessionStates(
           name: s.name ?? null,
           status: s.status,
           lastUserMessage: lastUserMessage(s),
+          lastStartedAt: s.lastStartedAt ?? null,
           lastCompletedAt: lastCompletedAt(s),
         });
       }
@@ -207,6 +206,64 @@ export interface CreateProjectInput {
   providerApiKey?: unknown;
   workspaceRoot?: unknown;
   allowedCommands?: unknown;
+  /** shell 免审策略 / 沙箱 / 变更追踪（与 .agent/permissions.json 同名） */
+  shellPolicy?: unknown;
+  sandbox?: unknown;
+  vcs?: unknown;
+}
+
+/**
+ * 让项目显示名不重复：重名时追加「 2」「 3」…
+ *
+ * 新建项目默认名都叫「我的工作区」这类通用词，不去重的话列表里会出现
+ * 两个一模一样的条目，用户无从分辨。
+ */
+function uniqueProjectName(store: Store, wanted: string): string {
+  const taken = new Set(
+    store.listTenants().map((id) => store.loadTenant(id)?.name?.trim() || id),
+  );
+  if (!taken.has(wanted)) return wanted;
+  for (let n = 2; n < 1000; n += 1) {
+    const candidate = `${wanted} ${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return `${wanted} ${Date.now()}`;
+}
+
+/** shell 免审策略：非法值丢弃（回落默认 approve） */
+function parseShellPolicy(raw: unknown): Pick<TenantConfig, "shellPolicy"> {
+  const v = String(raw ?? "").trim().toLowerCase();
+  return v === "approve" || v === "sandbox" || v === "workspace" || v === "all"
+    ? { shellPolicy: v }
+    : {};
+}
+
+/** 沙箱配置：mode 与 extraWritable 独立解析，非法项各自丢弃 */
+function parseSandbox(raw: unknown): Pick<TenantConfig, "sandbox"> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const obj = raw as Record<string, unknown>;
+  const mode = String(obj.mode ?? "").trim().toLowerCase();
+  const extraWritable = Array.isArray(obj.extraWritable)
+    ? obj.extraWritable.map((p) => String(p ?? "").trim()).filter((p) => p.length > 0)
+    : [];
+  const out: NonNullable<TenantConfig["sandbox"]> = {};
+  if (mode === "auto" || mode === "off" || mode === "required") {
+    out.mode = mode;
+  }
+  if (extraWritable.length) out.extraWritable = extraWritable;
+  return Object.keys(out).length ? { sandbox: out } : {};
+}
+
+/** 变更追踪配置 */
+function parseVcs(raw: unknown): Pick<TenantConfig, "vcs"> {
+  let mode: unknown = raw;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    mode = (raw as Record<string, unknown>).mode;
+  }
+  const v = String(mode ?? "").trim().toLowerCase();
+  return v === "auto" || v === "native" || v === "shadow" || v === "off"
+    ? { vcs: { mode: v } }
+    : {};
 }
 
 /**
@@ -219,22 +276,28 @@ export function createProject(store: Store, input: CreateProjectInput): TenantCo
   if (store.loadTenant(id)) {
     throw new ApiError(409, "project_exists", `项目 ${id} 已存在`);
   }
+  // 未指定目录时回退到节点默认工作区（WORKSPACE）：
+  // 会话本来就跑在那里，不回填的话「文件」面板会因为 workspaceRoot 为空而整块消失，
+  // 用户看到的是「新建了项目，但看不到任何文件」。
+  const defaultWorkspace = (process.env.WORKSPACE ?? "").trim();
   const workspaceRoot =
     typeof raw.workspaceRoot === "string" && raw.workspaceRoot.trim()
       ? path.resolve(raw.workspaceRoot.trim())
-      : undefined;
+      : defaultWorkspace
+        ? path.resolve(defaultWorkspace)
+        : undefined;
   // 默认名：用户未填时用工作目录名（basename）；无目录则用稳定 id。
   const explicitName =
     typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : "";
   const defaultName = workspaceRoot ? path.basename(workspaceRoot) : id;
   const tenant: TenantConfig = {
     id,
-    name: explicitName || defaultName,
+    name: uniqueProjectName(store, explicitName || defaultName),
     apiKey: generateApiKey(),
     model:
       typeof raw.model === "string" && raw.model.trim()
         ? raw.model.trim()
-        : DEFAULT_MODEL(),
+        : defaultTenantModel(store),
     provider: {
       apiKey:
         typeof raw.providerApiKey === "string" && raw.providerApiKey.trim()
@@ -249,6 +312,11 @@ export function createProject(store: Store, input: CreateProjectInput): TenantCo
     allowedCommands: Array.isArray(raw.allowedCommands)
       ? raw.allowedCommands.map((c) => String(c))
       : [],
+    // 以下三项此前只在类型里声明、建项目时没解析，导致「配置写了却不生效」。
+    // 非法值一律丢弃（回落到会话装配时的默认值），不因一个脏字段拒绝建项目。
+    ...parseShellPolicy(raw.shellPolicy),
+    ...parseSandbox(raw.sandbox),
+    ...parseVcs(raw.vcs),
   };
   // 新项目继承「节点默认 LLM」：未显式提供 provider 时带上节点默认的 baseURL/model/apiKey，
   // 并把节点级 LLM 列表复制为该项目的初始供应商（默认项置为当前）。

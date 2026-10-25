@@ -148,6 +148,26 @@ function utcDay(iso: string): string {
   return iso.slice(0, 10);
 }
 
+/**
+ * 汇总一组聚合值（跨天 / 跨项目求和）。
+ *
+ * 账本里按天、按项目是两套独立维度，需要总量时把其中一维的值相加——抽成
+ * 纯函数便于单测，也避免各处手写七个字段（漏一个就是静默的统计错误）。
+ */
+export function sumAgg(values: Iterable<UsageAgg>): UsageAgg {
+  const out = zeroAgg();
+  for (const v of values) {
+    out.calls += v.calls;
+    out.input += v.input;
+    out.output += v.output;
+    out.cacheRead += v.cacheRead;
+    out.cacheWrite += v.cacheWrite;
+    out.costUsd += v.costUsd;
+    out.unpriced += v.unpriced;
+  }
+  return out;
+}
+
 function monthOf(iso: string): string {
   return iso.slice(0, 7);
 }
@@ -484,6 +504,27 @@ export class UsageLedger {
       if (offset >= page.total) break;
     }
     return all;
+  }
+
+  /**
+   * 按「项目 × 天」聚合（供控制面把消耗拆到每个项目）。
+   *
+   * 汇总文件里只存了按项目、按天两个独立维度，拿不到交叉项，因此这里从
+   * 账本明细现算——调用方（节点上报）只取最近 40 天，读的是 2 个月文件，
+   * 5 分钟一次的成本可忽略。
+   */
+  projectByDay(opts: {
+    from: string;
+    to: string;
+  }): Record<string, Record<string, UsageAgg>> {
+    const out: Record<string, Record<string, UsageAgg>> = {};
+    for (const rec of this.allRecords({ from: opts.from, to: opts.to })) {
+      const day = utcDay(rec.ts);
+      const days = out[rec.projectId] ?? (out[rec.projectId] = {});
+      const agg = days[day] ?? (days[day] = zeroAgg());
+      addAgg(agg, rec, rec.costUsd);
+    }
+    return out;
   }
 
   summary(opts: {

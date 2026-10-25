@@ -1,7 +1,7 @@
 /**
  * 目录浏览 / 搜索 / 新建目录单测（项目工作目录选择）
  *
- * 覆盖：列出目录（目录优先）、用户主目录回退、新建目录（含多级）、
+ * 覆盖：列出目录（目录优先、大小/修改时间、根位置）、用户主目录回退、新建目录（含多级）、
  * 越界与非法名保护、同名文件冲突，以及目录内文件名模糊搜索
  * （子串/大小写/子序列、命中排序、limit 截断 + total、超大目录不逐个 stat）。
  */
@@ -31,6 +31,22 @@ describe("listDirs", () => {
     expect(r.entries.map((e) => `${e.type}:${e.name}`)).toEqual(["dir:a-sub", "file:b.txt"]);
   });
 
+  it("条目带大小与修改时间；目录大小统一为 0", () => {
+    fs.writeFileSync(path.join(dir, "big.log"), "12345");
+    const r = listDirs(dir);
+    const sub = r.entries.find((e) => e.name === "a-sub")!;
+    const file = r.entries.find((e) => e.name === "big.log")!;
+    expect(sub.size).toBe(0);
+    expect(Number.isNaN(Date.parse(sub.mtime))).toBe(false);
+    expect(file.size).toBe(5);
+    expect(Number.isNaN(Date.parse(file.mtime))).toBe(false);
+  });
+
+  it("返回可切换的根位置（非 Windows 为 /）", () => {
+    const r = listDirs(dir);
+    expect(r.roots).toEqual(process.platform === "win32" ? expect.any(Array) : ["/"]);
+  });
+
   it("路径不存在时抛出可读错误", () => {
     expect(() => listDirs(path.join(dir, "nope"))).toThrow(/路径不存在/);
   });
@@ -50,6 +66,8 @@ describe("makeDirIn", () => {
     const created = makeDirIn(dir, "new-one");
     expect(created.type).toBe("dir");
     expect(created.path).toBe(path.join(dir, "new-one"));
+    expect(created.size).toBe(0);
+    expect(Number.isNaN(Date.parse(created.mtime))).toBe(false);
     expect(fs.statSync(created.path).isDirectory()).toBe(true);
   });
 
@@ -67,6 +85,12 @@ describe("makeDirIn", () => {
   it("越出当前目录时报错且不创建", () => {
     expect(() => makeDirIn(dir, "../escape")).toThrow(/不能越出/);
     expect(fs.existsSync(path.join(path.dirname(dir), "escape"))).toBe(false);
+  });
+
+  it("名字以 .. 开头的目录是合法的，不算越界", () => {
+    const created = makeDirIn(dir, "..foo");
+    expect(created.path).toBe(path.join(dir, "..foo"));
+    expect(fs.statSync(created.path).isDirectory()).toBe(true);
   });
 
   it("同名文件冲突时报错", () => {
@@ -122,6 +146,8 @@ describe("searchDirs", () => {
     const hit = r.entries.find((e) => e.name === "node_exporter_proxy.txt");
     expect(hit).toBeTruthy();
     expect(hit!.path).toBe(path.join(dir, "node_exporter_proxy.txt"));
+    expect(hit!.size).toBe(1);
+    expect(Number.isNaN(Date.parse(hit!.mtime))).toBe(false);
   });
 
   it("limit 截断但 total 反映全部命中数", async () => {

@@ -21,10 +21,14 @@
  * 命令行参数（优先于同名环境变量）：
  *   --data-dir <dir>   --port <n>   --host <addr>
  *   --hub <url> --enroll-code <code> [--label <name>]   首次启动自动接入
+ *   --hub <url> --username <邮箱/手机号> --password <密码> [--label <name>]
+ *                                                        首次启动用 Hub 账号接入
+ *   --sms-code <code>  手机号 + 短信验证码登录（配合 --username/--phone）
  */
 import "dotenv/config";
 import { startServer } from "./runtime.js";
 import { maybeAccountEnroll } from "../cli/account-enroll.js";
+import { buildAccountAuth, isCompleteAccount } from "../cli/link.js";
 
 /** 读取 `--name value` 形式的命令行参数 */
 function arg(name: string): string | undefined {
@@ -35,15 +39,31 @@ function arg(name: string): string | undefined {
 const hubUrl = (arg("hub") ?? process.env.HUB_URL ?? "").trim();
 const enrollCode = (arg("enroll-code") ?? process.env.HUB_ENROLL_CODE ?? "").trim();
 const label = arg("label")?.trim();
+const account = buildAccountAuth({
+  username: arg("username") ?? arg("user"),
+  email: arg("email"),
+  phone: arg("phone"),
+  password: arg("password"),
+  smsCode: arg("sms-code"),
+});
 
-// 未带注册码的首次启动：交互式提示用 Hub 账号接入（已接入/非 TTY 时自动跳过）
-void maybeAccountEnroll({ dataDir: arg("data-dir"), hubUrl: arg("hub"), label }).finally(() => {
+// 注册码 / 完整账号参数优先；都没有时再进入交互向导（已接入/非 TTY 时自动跳过）
+const autoEnroll = hubUrl && enrollCode
+  ? { hubUrl, code: enrollCode, label }
+  : hubUrl && isCompleteAccount(account)
+    ? { hubUrl, account: account!, label }
+    : null;
+const beforeStart = autoEnroll
+  ? Promise.resolve()
+  : maybeAccountEnroll({ dataDir: arg("data-dir"), hubUrl: arg("hub"), label });
+
+void beforeStart.finally(() => {
   startServer({
     dataDir: arg("data-dir"),
     port: arg("port") ? Number(arg("port")) : undefined,
     host: arg("host"),
-    // 仅当两者齐备时启用「启动即接入」；已有 fleet.json 时会在 runtime 内被忽略
-    autoEnroll: hubUrl && enrollCode ? { hubUrl, code: enrollCode, label } : null,
+    // 已有 fleet.json 时会在 runtime 内被忽略
+    autoEnroll,
     autoUpdate: true,
   });
 });

@@ -14,7 +14,7 @@ export interface LlmPreset {
   name: string;
   /** OpenAI 兼容端点；空串表示需用户自行填写 */
   baseURL: string;
-  /** 建议默认模型；空串表示需用户自行填写 */
+  /** 建议默认模型；空串表示需要刷新模型列表后由用户选择 */
   model: string;
   /** 是否支持推理强度（reasoning effort）设置 */
   supportsReasoningEffort: boolean;
@@ -28,7 +28,10 @@ export const LLM_PRESETS: readonly LlmPreset[] = [
     id: "openai",
     name: "OpenAI",
     baseURL: "https://api.openai.com/v1",
-    model: "gpt-4o",
+    // 不预填模型：预填等于替用户拍板一个他既没选过、也可能没有权限的型号，
+    // 之后控制台的模型下拉就凭空多出这个「系统默认模型」。填完 Key 刷新模型，
+    // 由供应商实际返回的列表来选。
+    model: "",
     supportsReasoningEffort: true,
   },
   {
