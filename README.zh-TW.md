@@ -7,10 +7,10 @@
 🌐 **官網與使用文件：[agent.cd-zq.com](https://agent.cd-zq.com/)**
 
 [![Website](https://img.shields.io/badge/%E5%AE%98%E7%B6%B2-agent.cd--zq.com-4f46e5)](https://agent.cd-zq.com/)
-[![CI](https://github.com/zqagent/zqagent.git/actions/workflows/ci.yml/badge.svg)](https://github.com/zqagent/zqagent.git/actions/workflows/ci.yml)
+[![CI](https://github.com/zqagent/zqagent/actions/workflows/ci.yml/badge.svg)](https://github.com/zqagent/zqagent/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.17-brightgreen.svg)](https://nodejs.org/)
-[![Stars](https://img.shields.io/github/stars/zqagent/zqagent.git?style=social)](https://github.com/zqagent/zqagent.git)
+[![Stars](https://img.shields.io/github/stars/zqagent/zqagent?style=social)](https://github.com/zqagent/zqagent)
 [![npm](https://img.shields.io/npm/v/@zqagent/core?label=npm&color=4f46e5)](https://www.npmjs.com/package/@zqagent/core)
 
 ![zqagent 示範：讀檔案 → 跳出審批 → 跑測試](./docs/assets/demo.gif)
@@ -161,7 +161,7 @@ ZQAgent 的前提是**模型輸出不可信**：
 
 站點上的說明與群規：<https://agent.cd-zq.com/community/>
 
-不想用微信：到 [GitHub Issues](https://github.com/zqagent/zqagent.git/issues) 提問。
+不想用微信：到 [GitHub Issues](https://github.com/zqagent/zqagent/issues) 提問。
 
 ## 開發
 

@@ -7,10 +7,10 @@
 🌐 **Website and docs: [agent.cd-zq.com](https://agent.cd-zq.com/en/)**
 
 [![Website](https://img.shields.io/badge/website-agent.cd--zq.com-4f46e5)](https://agent.cd-zq.com/en/)
-[![CI](https://github.com/zqagent/zqagent.git/actions/workflows/ci.yml/badge.svg)](https://github.com/zqagent/zqagent.git/actions/workflows/ci.yml)
+[![CI](https://github.com/zqagent/zqagent/actions/workflows/ci.yml/badge.svg)](https://github.com/zqagent/zqagent/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.17-brightgreen.svg)](https://nodejs.org/)
-[![Stars](https://img.shields.io/github/stars/zqagent/zqagent.git?style=social)](https://github.com/zqagent/zqagent.git)
+[![Stars](https://img.shields.io/github/stars/zqagent/zqagent?style=social)](https://github.com/zqagent/zqagent)
 [![npm](https://img.shields.io/npm/v/@zqagent/core?label=npm&color=4f46e5)](https://www.npmjs.com/package/@zqagent/core)
 
 ![zqagent demo: read a file → approve the change → tests pass](./docs/assets/demo.gif)
@@ -158,7 +158,7 @@ fresh group automatically, so the same code keeps working.
 Group rules and more ways to reach us: <https://agent.cd-zq.com/en/community/>
 
 Prefer not to use WeChat? Open an issue at
-[GitHub Issues](https://github.com/zqagent/zqagent.git/issues).
+[GitHub Issues](https://github.com/zqagent/zqagent/issues).
 
 ## Development
 
