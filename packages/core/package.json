@@ -1,6 +1,6 @@
 {
   "name": "@zqagent/core",
-  "version": "0.2.52",
+  "version": "0.2.53",
   "description": "TypeScript agent engine core — TurnEngine, ToolRegistry, PermissionEngine, OpenAI provider with 18 built-in tools",
   "author": "成都志前科技有限公司",
   "type": "module",
