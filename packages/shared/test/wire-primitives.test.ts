@@ -126,15 +126,15 @@ describe("frame", () => {
     expect(() => encodeFrame({ type: FrameType.EVENT, seq: 0, payload: big })).toThrow();
   });
 
-  it("拒绝过短、magic 不符、版本不符、未知类型、len 不符", () => {
+  it("拒绝过短、magic 不符、版本不符、len 不符", () => {
     expect(() => decodeFrame(new Uint8Array([0x5a, 0x51, 0x10]))).toThrow();
     expect(() => decodeFrame(new Uint8Array([0, 0, 0x10, 0, 0]))).toThrow();
     const versionBad = encodeFrame({ type: FrameType.EVENT, seq: 0, payload: new Uint8Array() });
     versionBad[2] = 0x20 | FrameType.EVENT;
     expect(() => decodeFrame(versionBad)).toThrow();
-    const typeBad = encodeFrame({ type: FrameType.EVENT, seq: 0, payload: new Uint8Array() });
-    typeBad[2] = 0x10 | 0x0f;
-    expect(() => decodeFrame(typeBad)).toThrow();
+    // 低 4 位的 16 个类型（0..=15）已全部占用（TERMINAL 是最后一个），
+    // 不再有「未知类型」可作负例：类型空间的演进由上面的版本分支兜底。
+    expect(FrameType.TERMINAL).toBe(15);
     const lenBad = encodeFrame({ type: FrameType.EVENT, seq: 0, payload: new Uint8Array([1]) });
     expect(() => decodeFrame(lenBad.subarray(0, lenBad.length - 1))).toThrow();
   });

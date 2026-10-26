@@ -17,6 +17,7 @@ import { UsageLedger } from "./usage.js";
 import type { NotificationChannelConfig, TenantConfig } from "./types.js";
 import { SecretBox } from "../crypto/secrets.js";
 import { FleetNodeBridge } from "./fleet/FleetNodeBridge.js";
+import { TerminalManager } from "./terminals/TerminalManager.js";
 import { ensureNodeId } from "./projects.js";
 import {
   resolveFleetConfig,
@@ -366,6 +367,28 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
    */
   let updater: UpdateController | null = null;
 
+  /**
+   * 交互式终端（控制台「终端」面板）。
+   *
+   * 放在 `fleet` 声明之后：上行回调要引用桥（`fleet?.sendTerminal`），
+   * 桥的 deps 又引用本管理器（下行 input/resize）——两者互为闭包，靠 `fleet`
+   * 这个可变绑定解开先后顺序。
+   *
+   * `resolveWorkspace` 走 store：cwd 默认落在项目工作区根，未配置回退 home。
+   */
+  const terminals = new TerminalManager({
+    dir: path.join(dataDir, "terminals"),
+    resolveWorkspace: (projectId) => store.loadTenant(projectId)?.workspaceRoot ?? null,
+    // 输出上行：未接入云端时 sendTerminal 返回 false，本地 SSE 不受影响
+    onOutput: (ev) => {
+      fleet?.sendTerminal(ev.terminalId, ev.kind, ev.data, ev.seq);
+    },
+  });
+  void terminals.init().catch((e: unknown) => {
+    // 终端不可用不应阻断节点启动（索引损坏 / 目录无权限时仍要能跑对话）
+    console.warn(`[terminal] 初始化失败: ${e instanceof Error ? e.message : String(e)}`);
+  });
+
   function connectFleet(cred: FleetCredential): void {
     // 采用凭据中的 nodeId（控制面纳管标识）：新接入节点的本地 node.json 可能尚未生成，
     // 若各用各的随机 id，控制面看到的节点与本地会话数据就会对不上。
@@ -386,6 +409,7 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
       deps: {
         store,
         manager,
+        terminals,
         // 闭包推迟求值：桥先于 UpdateController 创建，指令到达时 updater 已就绪
         getUpdater: () => updater,
         applyFleetCred: async (cred) => {
@@ -593,6 +617,7 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
     fleet: fleetController,
     host,
     updater,
+    terminals,
   });
 
   /**
@@ -605,6 +630,8 @@ export function startServer(opts: StartServerOptions = {}): ServerHandle {
     if (closed) return;
     closed = true;
     updater?.stop();
+    // 终端子进程必须显式收掉：否则节点退出后它们会被 init 收养，成为孤儿进程
+    terminals.dispose();
     try {
       usageLedger.saveRollupNow();
       fleet?.close();

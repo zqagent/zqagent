@@ -34,6 +34,7 @@ import {
   setQuestionHandler,
   parsePicks,
   setPlanHandler,
+  interpretPlanReply,
   setDirectoryHandler,
   loadPermissionConfig,
   resolveSandbox,
@@ -1813,15 +1814,28 @@ async function main() {
     const renderer = new MarkdownRenderer({ unicode: UNICODE_SUPPORTED });
     const rendered = renderer.push(plan + "\n") + renderer.flush();
     cliWrite(rendered.trimEnd() + "\n");
+    /*
+     * 三种回应：
+     *   Y   → 批准，切换到执行模式；
+     *   D   → 拒绝，可附反馈；
+     *   其他 → 视为对计划的补充要求：把这句话交给模型，合并后重新提案。
+     *          原来这里的循环会把非 Y/D 的输入直接丢掉再问一遍，用户写下的
+     *          修改意见等于白写。
+     */
     while (true) {
-      const answer = await question("  [Y] 批准并执行  [D] 拒绝: ");
-      const lower = answer.trim().toLowerCase();
-      if (lower === "y" || lower === "yes")
-        return { approved: true, mode: "interactive" };
-      if (lower === "d" || lower === "n") {
+      const answer = await question(
+        "  [Y] 批准并执行  [D] 拒绝  或直接写补充要求（据此修订后重新提案）: ",
+      );
+      const reply = interpretPlanReply(answer);
+      if (reply.kind === "approve") return { approved: true, mode: "interactive" };
+      if (reply.kind === "reject") {
         const fb = await question("  反馈意见 (可选): ");
         return { approved: false, feedback: fb || "计划被拒绝" };
       }
+      // 空行不算补充要求，重新提示
+      if (reply.kind === "empty") continue;
+      cliLog("  ✏️  已记录补充要求，正在据此修订计划…");
+      return { approved: false, revised: true, feedback: reply.feedback };
     }
   });
 

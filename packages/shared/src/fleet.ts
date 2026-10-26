@@ -120,6 +120,25 @@ export type FleetCmdType =
   | "run_command"
   | "list_shell_tasks"
   | "kill_shell_task"
+  // ---------- 交互式终端（控制台「终端」面板） ----------
+  // 只承载低频控制动作；用户按键（input）与窗口尺寸（resize）走
+  // `FrameType.TERMINAL` 独立帧通道——那条路不等 ACK、不占单节点串行指令队列。
+  /** 列出项目下的终端（含已退出未删除的） */
+  | "terminal_list"
+  /** 新建终端（多终端并行：每次一个新进程） */
+  | "terminal_create"
+  /** 取回放缓冲（≤200KB）与元信息：切页签 / 断线重连用 */
+  | "terminal_replay"
+  /** 关闭进程（SIGTERM → 2s → SIGKILL），保留历史与元信息 */
+  | "terminal_close"
+  /** 关闭并删除历史（不可恢复） */
+  | "terminal_remove"
+  | "terminal_rename"
+  /** 命令/输出/退出历史（受保留期与落盘限速约束） */
+  | "terminal_history"
+  /** 终端设置（当前只有 retentionDays，默认 30 天） */
+  | "terminal_settings"
+  | "terminal_update_settings"
   | "git_repos"
   | "git_status"
   | "git_diff"
@@ -227,6 +246,15 @@ export const FLEET_CMD_TYPES: readonly FleetCmdType[] = [
   "run_command",
   "list_shell_tasks",
   "kill_shell_task",
+  "terminal_list",
+  "terminal_create",
+  "terminal_replay",
+  "terminal_close",
+  "terminal_remove",
+  "terminal_rename",
+  "terminal_history",
+  "terminal_settings",
+  "terminal_update_settings",
   "git_repos",
   "git_status",
   "git_diff",

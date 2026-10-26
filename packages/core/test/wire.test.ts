@@ -38,6 +38,8 @@ import {
   encodeSnapshot,
   encodeStatus,
   encodeSubscribe,
+  encodeTerminalData,
+  decodeTerminalData,
   frameTypeFromName,
   frameTypeName,
   signableAuthBytes,
@@ -74,9 +76,21 @@ interface FrameVector {
 
 interface MessageVector {
   name: string;
-  kind: "status" | "ack" | "event";
+  kind: "status" | "ack" | "event" | "terminal";
   json: Record<string, unknown>;
   hex: string;
+}
+
+/** 终端帧（`FrameType.TERMINAL`）：`frames` 是 CMD 专用结构，故单列一组 */
+interface TerminalFrameVector {
+  name: string;
+  seq: number;
+  nodeId: string;
+  terminalId: string;
+  kind: string;
+  dataHex: string;
+  payloadHex: string;
+  frameHex: string;
 }
 
 const vectors = JSON.parse(fs.readFileSync(vectorsFile, "utf-8")) as {
@@ -84,6 +98,7 @@ const vectors = JSON.parse(fs.readFileSync(vectorsFile, "utf-8")) as {
   secret: string;
   frames: FrameVector[];
   messages: MessageVector[];
+  terminalFrames: TerminalFrameVector[];
 };
 
 describe("线协议：帧编解码", () => {
@@ -128,10 +143,9 @@ describe("线协议：帧编解码", () => {
     badVer[2] = (9 << 4) | FrameType.CMD;
     expect(() => decodeFrame(badVer)).toThrow(/协议版本/);
 
-    // 未定义帧类型
-    const badType = ok.slice();
-    badType[2] = (PROTOCOL_VERSION << 4) | 15;
-    expect(() => decodeFrame(badType)).toThrow(/未定义的帧类型/);
+    // 低 4 位的 16 个取值（0..=15）已全部占用（TERMINAL 是最后一个），
+    // 已无「未定义帧类型」可作负例：后续演进只能升协议版本（上一分支覆盖）。
+    expect(FrameType.TERMINAL).toBe(15);
 
     // len 与剩余字节不符
     const extra = new Uint8Array(ok.length + 1);
@@ -503,6 +517,31 @@ describe("线协议：交叉向量（提交入库的字节基准）", () => {
     }
   });
 
+  it("终端帧：帧头与载荷逐字节一致（与 Rust 网关同基准）", () => {
+    for (const t of vectors.terminalFrames) {
+      const td = {
+        nodeId: t.nodeId || undefined,
+        terminalId: t.terminalId,
+        kind: t.kind,
+        data: t.dataHex ? fromHex(t.dataHex) : undefined,
+        seq: t.seq,
+      };
+      const payload = encodeTerminalData(td);
+      expect(toHex(payload), `${t.name} 载荷`).toBe(t.payloadHex);
+      expect(toHex(encodeFrame({ type: FrameType.TERMINAL, seq: t.seq, payload }))).toBe(
+        t.frameHex,
+      );
+
+      const frame = decodeFrame(fromHex(t.frameHex));
+      expect(frame.type, `${t.name} 帧类型`).toBe(FrameType.TERMINAL);
+      expect(frame.seq).toBe(t.seq);
+      const back = decodeTerminalData(frame.payload);
+      expect(back.terminalId).toBe(t.terminalId);
+      expect(back.kind).toBe(t.kind);
+      expect(back.nodeId ?? "").toBe(t.nodeId);
+    }
+  });
+
   it("消息：编码逐字节一致且可往返", () => {
     for (const m of vectors.messages) {
       const json = m.json;
@@ -591,6 +630,27 @@ describe("线协议：交叉向量（提交入库的字节基准）", () => {
         expect(toHex(encoded), `${m.kind}/${m.name} 编码`).toBe(m.hex);
         const back = decodeInfo(fromHex(m.hex));
         expect(back, `${m.kind}/${m.name} 解码`).toEqual(info);
+        continue;
+      } else if (m.kind === "terminal") {
+        const dataHex = String(json["dataHex"] ?? "");
+        const td = {
+          nodeId: (json["nodeId"] as string) || undefined,
+          terminalId: String(json["terminalId"]),
+          kind: String(json["kind"]),
+          data: dataHex ? fromHex(dataHex) : undefined,
+          seq: Number(json["seq"] ?? 0),
+        };
+        encoded = encodeTerminalData(td);
+        expect(toHex(encoded), `${m.kind}/${m.name} 编码`).toBe(m.hex);
+        // 逐字段比对：seq=0 属 proto3 默认值，不写线，解码得到 undefined
+        const back = decodeTerminalData(fromHex(m.hex));
+        expect(back.terminalId, `${m.kind}/${m.name} terminalId`).toBe(td.terminalId);
+        expect(back.kind, `${m.kind}/${m.name} kind`).toBe(td.kind);
+        expect(back.nodeId ?? "", `${m.kind}/${m.name} nodeId`).toBe(td.nodeId ?? "");
+        expect(toHex(back.data ?? new Uint8Array(0)), `${m.kind}/${m.name} data`).toBe(
+          toHex(td.data ?? new Uint8Array(0)),
+        );
+        expect(back.seq ?? 0, `${m.kind}/${m.name} seq`).toBe(td.seq);
         continue;
       } else {
         const dataHex = String(json["dataHex"] ?? "");

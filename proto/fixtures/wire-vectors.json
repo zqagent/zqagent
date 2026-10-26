@@ -175,6 +175,48 @@
       "authHex": "0a06757365722d3310b8e795ffbc311a08617574682d742d3320012a087465726d696e616c32037765623a20524112c5ca2e8efd700e94cbdcf7baa38ccdcd01a572887e78a301e89aa7c88642086e6f64652d61616142086e6f64652d6262624880adf180bd31"
     }
   ],
+  "terminalFrames": [
+    {
+      "name": "terminal-data-命令输出",
+      "seq": 3,
+      "nodeId": "",
+      "terminalId": "t_abc123",
+      "kind": "data",
+      "dataHex": "2420706e706d20746573740ae29c93203132207061737365640a",
+      "payloadHex": "1208745f6162633132331a0464617461221a2420706e706d20746573740ae29c93203132207061737365640a2803",
+      "frameHex": "5a511f032e1208745f6162633132331a0464617461221a2420706e706d20746573740ae29c93203132207061737365640a2803"
+    },
+    {
+      "name": "terminal-open-空载荷",
+      "seq": 0,
+      "nodeId": "",
+      "terminalId": "t_abc123",
+      "kind": "open",
+      "dataHex": "",
+      "payloadHex": "1208745f6162633132331a046f70656e",
+      "frameHex": "5a511f00101208745f6162633132331a046f70656e"
+    },
+    {
+      "name": "terminal-error-中文",
+      "seq": 9,
+      "nodeId": "",
+      "terminalId": "t_abc123",
+      "kind": "error",
+      "dataHex": "e88a82e782b9e7b981e5bf99efbc8ce8be93e585a5e5b7b2e4b8a2e5bc83",
+      "payloadHex": "1208745f6162633132331a056572726f72221ee88a82e782b9e7b981e5bf99efbc8ce8be93e585a5e5b7b2e4b8a2e5bc832809",
+      "frameHex": "5a511f09331208745f6162633132331a056572726f72221ee88a82e782b9e7b981e5bf99efbc8ce8be93e585a5e5b7b2e4b8a2e5bc832809"
+    },
+    {
+      "name": "terminal-input-带节点",
+      "seq": 1,
+      "nodeId": "node-aaa",
+      "terminalId": "t_abc123",
+      "kind": "input",
+      "dataHex": "6c73202d616c0d",
+      "payloadHex": "0a086e6f64652d6161611208745f6162633132331a05696e70757422076c73202d616c0d2801",
+      "frameHex": "5a511f01260a086e6f64652d6161611208745f6162633132331a05696e70757422076c73202d616c0d2801"
+    }
+  ],
   "messages": [
     {
       "name": "status-在线",
@@ -367,6 +409,50 @@
         "sessionId": "s2"
       },
       "hex": "080710909e96ffbc311a0e7475726e5f636f6d706c657465642a027332"
+    },
+    {
+      "name": "terminal-data-命令输出",
+      "kind": "terminal",
+      "json": {
+        "terminalId": "t_abc123",
+        "kind": "data",
+        "dataHex": "2420706e706d20746573740ae29c93203132207061737365640a",
+        "seq": 3
+      },
+      "hex": "1208745f6162633132331a0464617461221a2420706e706d20746573740ae29c93203132207061737365640a2803"
+    },
+    {
+      "name": "terminal-open-空载荷",
+      "kind": "terminal",
+      "json": {
+        "terminalId": "t_abc123",
+        "kind": "open",
+        "seq": 0
+      },
+      "hex": "1208745f6162633132331a046f70656e"
+    },
+    {
+      "name": "terminal-error-中文",
+      "kind": "terminal",
+      "json": {
+        "terminalId": "t_abc123",
+        "kind": "error",
+        "dataHex": "e88a82e782b9e7b981e5bf99efbc8ce8be93e585a5e5b7b2e4b8a2e5bc83",
+        "seq": 9
+      },
+      "hex": "1208745f6162633132331a056572726f72221ee88a82e782b9e7b981e5bf99efbc8ce8be93e585a5e5b7b2e4b8a2e5bc832809"
+    },
+    {
+      "name": "terminal-input-带节点",
+      "kind": "terminal",
+      "json": {
+        "nodeId": "node-aaa",
+        "terminalId": "t_abc123",
+        "kind": "input",
+        "dataHex": "6c73202d616c0d",
+        "seq": 1
+      },
+      "hex": "0a086e6f64652d6161611208745f6162633132331a05696e70757422076c73202d616c0d2801"
     }
   ]
 }

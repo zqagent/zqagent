@@ -386,13 +386,26 @@ export class UpdateController {
         patchState(this.opts.dataDir, { skippedVersion: undefined });
       }
 
+      /*
+       * 下面两处"不更新"都有正当理由，但后台定时器调用时没有调用方会读返回值：
+       * 不写日志就等于完全静默。曾经有过节点连续几周每天检查、却因为清单里少了
+       * 自己的平台键而一直停在旧版本，日志里只有「检查更新：…」一行，无从排查。
+       */
       const maxFailures = num("ZQAGENT_UPDATE_MAX_FAILURES", 3);
       if (state.failedVersion === manifest.version && (state.failureCount ?? 0) >= maxFailures) {
-        return `v${manifest.version} 已连续失败 ${state.failureCount} 次，跳过（等待下一版本）`;
+        const msg = `v${manifest.version} 已连续失败 ${state.failureCount} 次，跳过（等待下一版本）`;
+        this.log(msg);
+        return msg;
       }
 
-      const bin = manifest.binaries[platformKey()];
-      if (!bin) return `清单没有当前平台（${platformKey()}）的产物`;
+      const platform = platformKey();
+      const bin = manifest.binaries[platform];
+      if (!bin) {
+        const available = Object.keys(manifest.binaries).join(", ") || "（空）";
+        const msg = `清单没有当前平台（${platform}）的产物；清单提供：${available}`;
+        this.log(msg);
+        return msg;
+      }
 
       // 已暂存同一版本且文件有效 → 直接进入安装
       let stagedPath = state.stagedPath;

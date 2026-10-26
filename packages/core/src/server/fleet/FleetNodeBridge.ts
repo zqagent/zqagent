@@ -20,6 +20,13 @@ import {
   type FleetBatchResult,
   type FleetBatchSubCmd,
 } from "@zqagent/shared/fleet";
+import {
+  encodeFrame,
+  encodeTerminalData,
+  decodeTerminalData,
+  FrameType,
+  utf8Decode,
+} from "@zqagent/shared/wire";
 import { dispatchFleetCommand, type FleetDeps } from "./FleetCommands.js";
 import { encodeOutbound, fromWireCommand, guardAckSize, type FleetOutbound } from "./fleetWire.js";
 import { WssLink } from "./wssLink.js";
@@ -288,6 +295,11 @@ export class FleetNodeBridge {
       onReject: (reason) => {
         // 与旧行为一致：签名/nonce 校验失败只留痕，不打断链路
         dbgMark("reject", reason);
+      },
+      // 终端数据（input / resize）走独立帧类型，不经指令队列：
+      // 那条路是单节点串行且要等 ACK 的，按键会排到对话指令后面。
+      onFrame: (type, payload) => {
+        if (type === FrameType.TERMINAL) this._onTerminalFrame(payload);
       },
     });
     this.wssLink = link;
@@ -926,5 +938,64 @@ export class FleetNodeBridge {
       return;
     }
     link.send(frame);
+  }
+
+  /**
+   * 终端数据上行（控制台「终端」面板的输出 / 状态）。
+   *
+   * **刻意绕开 `_send`**：那条路径是 JSON 事件的批量合并（60ms 窗口），
+   * 终端需要的是逐块、低延迟的字节流；更重要的是终端帧必须使用
+   * `FrameType.TERMINAL`，由网关走独立队列扇出，不与会话事件共用通道
+   * （见 proto 的 `TerminalData` 与 gateway 的 `terminal_tx`）。
+   *
+   * 返回 false 表示链路未就绪（本地 SSE 仍可用；重连后新输出会继续上来）。
+   */
+  sendTerminal(
+    terminalId: string,
+    kind: string,
+    data: Uint8Array | undefined,
+    seq: number,
+  ): boolean {
+    const link = this.wssLink;
+    if (!link || !link.isReady()) return false;
+    const payload = encodeTerminalData({ terminalId, kind, data, seq });
+    return link.send(encodeFrame({ type: FrameType.TERMINAL, seq: 0, payload }));
+  }
+
+  /**
+   * 终端数据下行（网关 → 节点）：只有高频的 `input` 与 `resize` 走这条路径。
+   *
+   * 关闭/删除等控制动作用普通指令（`terminal_close` 等）：它们低频，且需要
+   * 明确回执——帧通道是可丢的，不能用来表达「必须生效」的语义。
+   */
+  private _onTerminalFrame(payload: Uint8Array): void {
+    const terminals = this.opts.deps.terminals;
+    if (!terminals) return;
+    let td;
+    try {
+      td = decodeTerminalData(payload);
+    } catch {
+      return; // 载荷非法：静默丢弃，别让一条坏帧打断链路
+    }
+    if (!td.terminalId) return;
+    if (td.kind === "input") {
+      if (td.data && td.data.length > 0) terminals.write(td.terminalId, utf8Decode(td.data));
+      return;
+    }
+    if (td.kind === "resize") {
+      try {
+        const o = JSON.parse(utf8Decode(td.data ?? new Uint8Array())) as {
+          cols?: unknown;
+          rows?: unknown;
+        };
+        terminals.resize(
+          td.terminalId,
+          Number(o.cols ?? 80) || 80,
+          Number(o.rows ?? 24) || 24,
+        );
+      } catch {
+        /* 非法尺寸载荷忽略 */
+      }
+    }
   }
 }

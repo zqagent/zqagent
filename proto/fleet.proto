@@ -216,3 +216,37 @@ message Resume {
   uint64 since = 1;
 }
 
+// ---------------------------------------------------------------------------
+// 命令终端数据（控制台「终端」面板）
+//
+// **与 Event 完全隔离**，这是刻意的架构约束而非遗漏：
+//   - 不进事件环形缓冲（`EventBuffer`）：终端输出会把会话事件的 500 条位置挤掉；
+//   - 不分配全局 `event_seq`：那是事件游标，终端数据不参与 resume；
+//   - 不广播到跨副本总线：终端只对发起它的那个浏览器会话有意义；
+//   - 走**独立的下行发送队列**：与心跳/ACK/Event 共用队列时，终端刷屏会把
+//     ping 挤掉 → 心跳超时判死整条连接（见 gateway/src/main.rs 的 terminal_tx）。
+// 规范与容量理由见 docs/wire-protocol.md。
+// ---------------------------------------------------------------------------
+message TerminalData {
+  /**
+   * 目标节点。终端面下行（open/input/resize/close）用它路由；
+   * 节点面上行时留空，由**网关**按连接绑定的 nodeId 填充（与 Event.node_id 同规则）。
+   */
+  string node_id = 1;
+  /** 终端实例 ID（节点侧生成，形如 `t_xxxxxxxx`；与会话 ID 不同空间） */
+  string terminal_id = 2;
+  /**
+   * 帧种类：
+   *   opened | data | exited | error   —— 节点 → 网关 → 终端
+   *   open | input | resize | close     —— 终端 → 网关 → 节点
+   */
+  string kind = 3;
+  /** 载荷：data 为原始输出/输入字节；open/resize/error 为 JSON 字节 */
+  bytes data = 4;
+  /**
+   * 终端内局部序号（单调递增）。仅在该终端内有效，用于让 xterm 侧发现丢帧，
+   * **不是**网关全局事件游标，不参与 resume。
+   */
+  uint64 seq = 5;
+}
+

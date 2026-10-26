@@ -45,7 +45,7 @@ import { registerWebTools } from "../tools/web.js";
 import { registerGitTools } from "../tools/git.js";
 import { registerDiffTools } from "../tools/diff.js";
 import { registerAskTool } from "../tools/ask.js";
-import { registerPlanTool } from "../tools/plan.js";
+import { interpretPlanReply, isAffirmativeText, registerPlanTool } from "../tools/plan.js";
 import { registerDirectoryTool } from "../tools/directories.js";
 import { registerTodoTool, TodoList } from "../tools/todo.js";
 import { registerExploreTool } from "../tools/explore.js";
@@ -483,11 +483,30 @@ function isDeltaEvent(type: string): boolean {
 }
 
 /** 判断用户回答是否为「同意」（兼容 approve/yes/y/同意… 及控制台选项值） */
-function isAffirmative(answer: string): boolean {
-  const a = answer.trim().toLowerCase();
-  if (!a) return false;
-  if (["y", "yes", "approve", "approved", "ok", "true", "a", "1"].includes(a)) return true;
-  return /^(yes|approve|同意|批准|允许|确定|可以|好的|确认)/.test(a);
+/**
+ * 解析计划提案的回答（判定逻辑与 CLI 共用，见 tools/plan.ts 的 interpretPlanReply）。
+ *
+ * 三种结果，语义必须分清：
+ *   - 批准：`approved: true`；
+ *   - 拒绝：整句就是拒绝词（含 Web 端点「拒绝」按钮提交的 reject）；
+ *   - 修订：其余自由文本都是「对计划的补充要求」，带 `revised: true`，
+ *     由模型合并进原计划后重新提案，而不是把方案丢掉。
+ */
+export function parsePlanAnswer(answer: string): {
+  approved?: boolean;
+  revised?: boolean;
+  feedback?: string;
+} {
+  const reply = interpretPlanReply(answer);
+  if (reply.kind === "approve") return { approved: true };
+  if (reply.kind === "reject") {
+    return { approved: false, feedback: answer.trim() || "计划被拒绝" };
+  }
+  return {
+    approved: false,
+    revised: true,
+    feedback: reply.kind === "revise" ? reply.feedback : "用户要求补充修正计划",
+  };
 }
 
 /** 创建一个 Promise，并返回一个原地 resolve 函数 */
@@ -1473,14 +1492,10 @@ export class SessionManager {
   /** 按提问类型解析回答为结构化结果（供引擎 handler 返回） */
   private _parseAnswer(record: QuestionRecord, answer: string): QuestionRecord["parsed"] {
     if (record.kind === "plan") {
-      const approved = isAffirmative(answer);
-      return {
-        approved,
-        feedback: approved ? undefined : answer.trim() || "计划被拒绝",
-      };
+      return parsePlanAnswer(answer);
     }
     if (record.kind === "directory") {
-      const granted = isAffirmative(answer);
+      const granted = isAffirmativeText(answer);
       return {
         granted,
         path: granted ? record.suggestedPath : undefined,

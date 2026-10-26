@@ -34,6 +34,14 @@ export const FrameType = {
   PONG: 13,
   /** 握手结果（服务端 → 客户端）。与 AUTH 分开，避免「同类型双向」的解析歧义 */
   AUTH_OK: 14,
+  /**
+   * 命令终端数据（`TerminalData`）。
+   *
+   * 注意低 4 位的 16 个取值到此用尽：之后再扩帧类型只能升协议版本。
+   * 与 `EVENT` 分开是**性能隔离**（终端数据不进事件环形缓冲、不分配全局游标、
+   * 不走事件扇出队列），理由见 `proto/fleet.proto` 的 `TerminalData`。
+   */
+  TERMINAL: 15,
 } as const;
 export type FrameTypeName = keyof typeof FrameType;
 export type FrameTypeValue = (typeof FrameType)[FrameTypeName];

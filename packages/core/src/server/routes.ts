@@ -93,6 +93,7 @@ import {
 } from "./notify/tenantNotifications.js";
 import type { QqManager } from "./qq/QqManager.js";
 import type { FleetController } from "./fleet-config.js";
+import type { TerminalManager } from "./terminals/TerminalManager.js";
 import type {
   DeviceRecord,
   NotificationChannelConfig,
@@ -223,6 +224,12 @@ function match(
   return params;
 }
 
+/** 终端能力未启用时给出可读错误，而不是 TypeError（旧配置/精简部署会走到这里） */
+function requireTerminals(mgr: TerminalManager | null): TerminalManager {
+  if (!mgr) throw new ApiError(503, "unavailable", "本节点未启用终端功能");
+  return mgr;
+}
+
 /** 租户配置的非敏感视图（供桌面端设置页读取；绝不回传 apiKey 明文） */
 function configView(tenant: TenantConfig) {
   const active = (tenant.llmProviders ?? []).find((p) => p.id === tenant.activeProviderId);
@@ -285,10 +292,13 @@ export function createApp(
     } | null;
     /** 自更新控制器（/node/self-update 用；缺省时该接口报不可用） */
     updater?: SelfUpdater | null;
+    /** 交互式终端管理器（/terminals/*；缺省时该组接口报不可用） */
+    terminals?: TerminalManager | null;
   } = {},
 ) {
   setupServerHandlers(manager);
   const updater = opts.updater ?? null;
+  const terminals = opts.terminals ?? null;
 
   const routes: Route[] = [
     // ---------- 会话管理 ----------
@@ -1141,6 +1151,203 @@ export function createApp(
       pattern: ["shell", "tasks"],
       fn: (_req, res, { tenant }) => {
         ok(res, { tasks: listShellTasks(tenant.id) });
+      },
+    },
+
+    // ---------- 交互式终端（控制台「终端」面板） ----------
+    //
+    // 与上面的 `/shell` 本质不同：`/shell` 是一条命令一次请求（前台、超时截断），
+    // 这里是**长驻进程 + 双向流**。用户按键走 `POST /terminals/:id/input`
+    // （远端节点对应 `FrameType.TERMINAL` 独立通道），输出走 `/terminals/stream`。
+    // 顺序注意：`settings` / `stream` 必须排在 `:id` 之前（同段数，先匹配者胜）。
+    {
+      method: "GET",
+      pattern: ["terminals"],
+      fn: (_req, res, { tenant }) => {
+        ok(res, { terminals: requireTerminals(terminals).list(tenant.id) });
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["terminals"],
+      fn: async (_req, res, { tenant, body }) => {
+        const raw = (body ?? {}) as { label?: unknown };
+        ok(
+          res,
+          {
+            terminal: await requireTerminals(terminals).create({
+              projectId: tenant.id,
+              label: typeof raw.label === "string" ? raw.label : undefined,
+            }),
+          },
+        );
+      },
+    },
+    // 终端输出流：一条 SSE 订阅该项目下**全部**终端（含之后新建的）。
+    // 与 /events/stream 分开：终端输出高频可丢，不能和会话事件抢同一条连接。
+    {
+      method: "GET",
+      pattern: ["terminals", "stream"],
+      fn: (req, res, { tenant }) => {
+        const mgr = requireTerminals(terminals);
+        const accept = req.headers.accept ?? "";
+        if (!accept.includes("text/event-stream")) {
+          throw new ApiError(400, "bad_request", "需要 Accept: text/event-stream");
+        }
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Headers":
+            "Authorization, Content-Type, X-Project-Id, Cache-Control, Accept",
+          "X-Accel-Buffering": "no",
+        });
+        res.write(": connected\n\n");
+        res.socket?.setNoDelay?.(true);
+        res.socket?.setTimeout(0);
+        // 心跳：终端安静时也保持连接（反向代理会掐掉长时间无数据的流）
+        const heartbeat = setInterval(() => {
+          if (!res.writableEnded) res.write(": ping\n\n");
+        }, 15000);
+        heartbeat.unref?.();
+        const detach = mgr.subscribeProject(tenant.id, (ev) => {
+          if (res.writableEnded) return;
+          // 输出用 base64：终端输出是任意字节（可能是半截 UTF-8），
+          // 直接塞进 JSON 字符串会被替换字符破坏
+          const data = ev.data ? Buffer.from(ev.data).toString("base64") : "";
+          const frame = `data: ${JSON.stringify({
+            terminalId: ev.terminalId,
+            kind: ev.kind,
+            seq: ev.seq,
+            ts: ev.ts,
+            data,
+          })}\n\n`;
+          try {
+            res.write(frame);
+          } catch {
+            /* 连接已断，close 回调会清理 */
+          }
+        });
+        const cleanup = () => {
+          clearInterval(heartbeat);
+          detach();
+        };
+        res.on("close", cleanup);
+        res.on("error", () => {
+          res.socket?.destroy();
+          cleanup();
+        });
+      },
+    },
+    {
+      method: "GET",
+      pattern: ["terminals", "settings"],
+      fn: async (_req, res) => {
+        ok(res, { settings: await requireTerminals(terminals).settings() });
+      },
+    },
+    {
+      method: "PATCH",
+      pattern: ["terminals", "settings"],
+      fn: async (_req, res, { body }) => {
+        const raw = (body ?? {}) as { retentionDays?: unknown };
+        ok(
+          res,
+          {
+            settings: await requireTerminals(terminals).updateSettings({
+              retentionDays:
+                typeof raw.retentionDays === "number" ? raw.retentionDays : undefined,
+            }),
+          },
+        );
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["terminals", ":id", "input"],
+      fn: (_req, res, { params, body }) => {
+        const raw = (body ?? {}) as { data?: unknown };
+        const accepted = requireTerminals(terminals).write(
+          params["id"]!,
+          String(raw.data ?? ""),
+        );
+        // 进程已退出 → 409：前端据此提示「终端已结束，请重开」
+        if (!accepted) {
+          throw new ApiError(409, "terminal_exited", "终端已退出，请重新打开");
+        }
+        ok(res, { ok: true });
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["terminals", ":id", "resize"],
+      fn: (_req, res, { params, body }) => {
+        const raw = (body ?? {}) as { cols?: unknown; rows?: unknown };
+        const accepted = requireTerminals(terminals).resize(
+          params["id"]!,
+          Number(raw.cols ?? 80) || 80,
+          Number(raw.rows ?? 24) || 24,
+        );
+        ok(res, { ok: accepted });
+      },
+    },
+    {
+      method: "GET",
+      pattern: ["terminals", ":id", "replay"],
+      fn: (_req, res, { params }) => {
+        const mgr = requireTerminals(terminals);
+        const id = params["id"]!;
+        const meta = mgr.get(id);
+        if (!meta) throw new ApiError(404, "not_found", "终端不存在");
+        ok(res, { meta, output: mgr.replayOutput(id) });
+      },
+    },
+    {
+      method: "GET",
+      pattern: ["terminals", ":id", "history"],
+      fn: async (req, res, { params }) => {
+        const q = new URL(req.url!, "http://localhost").searchParams;
+        const limitRaw = q.get("limit");
+        ok(
+          res,
+          {
+            records: await requireTerminals(terminals).history(params["id"]!, {
+              limit: limitRaw === null ? undefined : Number(limitRaw) || undefined,
+            }),
+          },
+        );
+      },
+    },
+    {
+      method: "POST",
+      pattern: ["terminals", ":id", "close"],
+      fn: async (_req, res, { params }) => {
+        const meta = await requireTerminals(terminals).close(params["id"]!);
+        if (!meta) throw new ApiError(404, "not_found", "终端不存在");
+        ok(res, { terminal: meta });
+      },
+    },
+    {
+      method: "PATCH",
+      pattern: ["terminals", ":id"],
+      fn: async (_req, res, { params, body }) => {
+        const raw = (body ?? {}) as { label?: unknown };
+        const meta = await requireTerminals(terminals).rename(
+          params["id"]!,
+          String(raw.label ?? ""),
+        );
+        if (!meta) throw new ApiError(400, "bad_request", "终端不存在或名称为空");
+        ok(res, { terminal: meta });
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: ["terminals", ":id"],
+      fn: async (_req, res, { params }) => {
+        const removed = await requireTerminals(terminals).remove(params["id"]!);
+        if (!removed) throw new ApiError(404, "not_found", "终端不存在");
+        ok(res, { removed: true });
       },
     },
     {

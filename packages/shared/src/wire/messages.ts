@@ -66,6 +66,29 @@ export interface EventMsg {
   nodeId?: string;
 }
 
+/**
+ * 命令终端数据（`FrameType.TERMINAL`）。
+ *
+ * 与 `EventMsg` 完全平行的另一条通道，**不是** Event 的一种：它不参与
+ * seq 游标、不入事件环形缓冲、不跨副本广播（理由见 proto 注释）。
+ */
+export interface TerminalData {
+  /** 目标节点；节点上行时留空，由网关按连接绑定填充 */
+  nodeId?: string;
+  /** 终端实例 ID（节点侧生成，`t_` 前缀；与会话 ID 不同空间） */
+  terminalId: string;
+  /**
+   * 帧种类：
+   *   opened | data | exited | error   —— 节点 → 网关 → 终端
+   *   open | input | resize | close     —— 终端 → 网关 → 节点
+   */
+  kind: string;
+  /** data 为原始字节；open/resize/error 为 JSON 字节 */
+  data?: Uint8Array;
+  /** 终端内局部序号（仅该终端内有效，不参与 resume） */
+  seq?: number;
+}
+
 // ===================== Envelope =====================
 
 export function encodeEnvelope(env: Envelope): Uint8Array {
@@ -614,6 +637,51 @@ export function decodeAuthOk(bytes: Uint8Array): AuthOk {
     }
   }
   return out;
+}
+
+// ===================== 终端数据 =====================
+
+export function encodeTerminalData(td: TerminalData): Uint8Array {
+  const w = new Writer(64 + (td.data?.length ?? 0));
+  w.stringField(1, td.nodeId ?? "");
+  w.stringField(2, td.terminalId);
+  w.stringField(3, td.kind);
+  w.bytesField(4, td.data ?? EMPTY_BYTES);
+  w.uint64Field(5, td.seq ?? 0);
+  return w.finish();
+}
+
+export function decodeTerminalData(bytes: Uint8Array): TerminalData {
+  const r = new Reader(bytes);
+  const td: TerminalData = { terminalId: "", kind: "" };
+  while (!r.eof) {
+    const { field, wire } = r.tag();
+    switch (field) {
+      case 1:
+        if (wire !== WIRE_LEN) r.skip(wire);
+        else td.nodeId = r.string();
+        break;
+      case 2:
+        if (wire !== WIRE_LEN) r.skip(wire);
+        else td.terminalId = r.string();
+        break;
+      case 3:
+        if (wire !== WIRE_LEN) r.skip(wire);
+        else td.kind = r.string();
+        break;
+      case 4:
+        if (wire !== WIRE_LEN) r.skip(wire);
+        else td.data = r.lenPrefixed();
+        break;
+      case 5:
+        if (wire !== WIRE_VARINT) r.skip(wire);
+        else td.seq = r.u64();
+        break;
+      default:
+        r.skip(wire);
+    }
+  }
+  return td;
 }
 
 // ===================== 快照 / 订阅 =====================

@@ -17,6 +17,7 @@ import {
   encodeFrame,
   encodeInfo,
   encodeNotify,
+  encodeTerminalData,
   encodeSnapshot,
   encodeStatus,
   encodeSubscribe,
@@ -418,6 +419,69 @@ const notifyVectors = [
   hex: toHex(encodeNotify(msg)),
 }));
 
+// ---- 终端数据（控制台终端面板；独立帧类型，不进事件流）----
+//
+// 这组向量守两件事：一是 `TerminalData` 的字段号/编码与其他消息同样严格；
+// 二是 `FrameType.TERMINAL = 15` 的帧头字节与 Rust 侧一致——终端帧走**独立队列**，
+// 一旦两侧字节不同，网关会把终端数据当未知帧静默丢弃。
+const terminalCases = [
+  {
+    name: "terminal-data-命令输出",
+    td: {
+      terminalId: "t_abc123",
+      kind: "data",
+      data: utf8Encode("$ pnpm test\n✓ 12 passed\n"),
+      seq: 3,
+    },
+  },
+  {
+    name: "terminal-open-空载荷",
+    td: { terminalId: "t_abc123", kind: "open", seq: 0 },
+  },
+  {
+    name: "terminal-error-中文",
+    td: {
+      terminalId: "t_abc123",
+      kind: "error",
+      data: utf8Encode("节点繁忙，输入已丢弃"),
+      seq: 9,
+    },
+  },
+  {
+    name: "terminal-input-带节点",
+    td: { nodeId: "node-aaa", terminalId: "t_abc123", kind: "input", data: utf8Encode("ls -al\r"), seq: 1 },
+  },
+];
+
+const terminalVectors = terminalCases.map(({ name, td }) => ({
+  name,
+  kind: "terminal",
+  json: pruneEmpty({
+    nodeId: td.nodeId ?? "",
+    terminalId: td.terminalId,
+    kind: td.kind,
+    dataHex: td.data ? toHex(td.data) : "",
+    seq: td.seq ?? 0,
+  }),
+  hex: toHex(encodeTerminalData(td)),
+}));
+
+/** 帧级向量：`frames` 是 CMD 专用结构，终端帧单列一组 */
+const terminalFrames = terminalCases.map(({ name, td }) => {
+  const payload = encodeTerminalData(td);
+  const seq = td.seq ?? 0;
+  return {
+    name,
+    seq,
+    nodeId: td.nodeId ?? "",
+    terminalId: td.terminalId,
+    kind: td.kind,
+    dataHex: td.data ? toHex(td.data) : "",
+    payloadHex: toHex(payload),
+    frameHex: toHex(encodeFrame({ type: FrameType.TERMINAL, seq, payload })),
+  };
+});
+
 const payload = {
   note: "线协议 v1 交叉验证向量。由 packages/core/scripts/gen_wire_vectors.ts 生成，勿手改。",
   spec: "docs/wire-protocol.md",
@@ -426,7 +490,8 @@ const payload = {
   secret: SECRET,
   frames,
   handshakes,
-  messages: [...statusVectors, ...ackVectors, ...eventVectors, ...subscribeVectors, ...snapshotVectors, ...infoVectors, ...notifyVectors],
+  terminalFrames,
+  messages: [...statusVectors, ...ackVectors, ...eventVectors, ...subscribeVectors, ...snapshotVectors, ...infoVectors, ...notifyVectors, ...terminalVectors],
 };
 
 fs.mkdirSync(path.dirname(outFile), { recursive: true });

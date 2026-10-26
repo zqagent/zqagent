@@ -14,7 +14,7 @@ import { parseMaxIterations } from "../engine/limits.js";
 import { EventType, type EngineHook, type WsEvent } from "../engine/events.js";
 import { PermissionEngine, Mode } from "../permissions/PermissionEngine.js";
 import type { ProviderClient } from "../providers/OpenAIProvider.js";
-import { EXPLORER_INSTRUCTIONS } from "../prompts/index.js";
+import { buildExplorerInstructions } from "../prompts/index.js";
 import { registerReadOnlyFileTools } from "./files.js";
 import { registerSearchTool } from "./search.js";
 import { registerGitTools } from "./git.js";
@@ -24,6 +24,9 @@ import { registerGitTools } from "./git.js";
  *
  * 只注册只读工具，使用 Plan 模式权限引擎（硬阻断所有写入），
  * 迭代上限默认 30 次（环境变量 EXPLORE_MAX_ITERATIONS 可覆盖）。
+ *
+ * 上限同时写进提示词，并开启「撞上限后收尾」：子代理不会因为不知道预算而
+ * 把轮次耗在漫游上，真到上限也能把已有发现写成报告，而不是整轮作废。
  *
  * 可选 readonlyRegistrars：外部可注入"只读工具注册器"（例如沙箱远程工具），
  * 用于把 explore 子代理的执行目标从宿主机工作区切换到远程沙箱。
@@ -60,13 +63,17 @@ export function buildExplorerEngine(opts: {
     mode: Mode.PLAN,
   });
 
+  // 预算只解析一次：提示词与实际上限必须是同一个数，否则模型按错误预算收敛
+  const maxIterations = parseMaxIterations(process.env.EXPLORE_MAX_ITERATIONS, 30);
+
   return new TurnEngine({
     provider: opts.provider,
     registry,
     permissions,
     model: opts.model,
-    instructions: EXPLORER_INSTRUCTIONS,
-    maxIterations: parseMaxIterations(process.env.EXPLORE_MAX_ITERATIONS, 30),
+    instructions: buildExplorerInstructions(maxIterations),
+    maxIterations,
+    finalizeOnMaxIterations: true,
     hook: opts.hook,
     toolResultDir: opts.toolResultDir,
   });
@@ -108,6 +115,10 @@ export function makeExploreTool(opts: {
 
     let report = "";
     let status = "unknown";
+    /** 子代理实际用掉的迭代轮次（写进 note，便于主代理判断要不要拆分任务重试） */
+    let iterations = 0;
+    /** 撞上限后是否已由收尾轮补出报告（见 TurnEngine.finalizeOnMaxIterations） */
+    let finalized = false;
 
     try {
       // 驱动子引擎运行，捕获最终报告与结束状态
@@ -117,6 +128,8 @@ export function makeExploreTool(opts: {
         }
         if (event.type === EventType.TURN_END) {
           status = String(event.data.status ?? "unknown");
+          iterations = Number(event.data.iterations ?? 0);
+          finalized = event.data.finalized === true;
         }
         if (event.type === EventType.ERROR) {
           return { error: `explorer 错误: ${event.data.error}` };
@@ -133,7 +146,10 @@ export function makeExploreTool(opts: {
     const result: Record<string, unknown> = { report };
     // 子代理提前终止（如达到迭代上限）时提示报告可能不完整
     if (status !== "completed") {
-      result.note = `explorer 提前停止 (${status})；报告可能不完整`;
+      result.note = finalized
+        ? `已达探索上限（${iterations} 轮），报告由收尾轮补全，可能不完整；` +
+          "如需更完整的结果，请把任务拆小后重试，或调大 EXPLORE_MAX_ITERATIONS"
+        : `explorer 提前停止 (${status}，${iterations} 轮)；报告可能不完整`;
     }
     return result;
   };
@@ -168,7 +184,7 @@ export function registerExploreTool(
       function: {
         name: "explore",
         description:
-          "优先使用此工具执行跨文件代码探索任务——它在独立上下文中搜索，只返回最终报告，不消耗你的主上下文。子代理可读取文件、搜索内容、查看 git 历史。使用场景：追踪调用链/数据流、了解模块架构与组织方式、查找某个功能或错误处理的实现位置、理解项目中的代码模式。不要用此工具：读取单个已知文件、简单单文件搜索——这些场景直接自己读取即可。多个独立的 explore 调用可以并行执行。精确描述任务并说明报告应包含什么。",
+          "优先使用此工具执行跨文件代码探索任务——它在独立上下文中搜索，只返回最终报告，不消耗你的主上下文。子代理可读取文件、搜索内容、查看 git 历史。使用场景：追踪调用链/数据流、了解模块架构与组织方式、查找某个功能或错误处理的实现位置、理解项目中的代码模式。不要用此工具：读取单个已知文件、简单单文件搜索——这些场景直接自己读取即可。多个独立的 explore 调用可以并行执行。单个 explore 只解决一个具体问题：跨度大的任务拆成多个并行 explore，比让它一次探索全部更完整（子代理有轮次上限）。精确描述任务并说明报告应包含什么。",
         parameters: {
           type: "object",
           properties: {

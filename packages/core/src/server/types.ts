@@ -148,6 +148,8 @@ export interface QuestionRecord {
     granted?: boolean;
     path?: string;
     feedback?: string;
+    /** 计划提案：用户既没批准也没拒绝，而是提出了补充要求（修订后重新提案） */
+    revised?: boolean;
   };
   /**
    * 回答已被引擎消费（工具 handler 已取走答案）。resume 重放提问工具时，

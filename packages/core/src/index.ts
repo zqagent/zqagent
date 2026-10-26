@@ -134,7 +134,7 @@ export {
   buildEnvBlock,
   CODE_INSTRUCTIONS,
   COWORK_INSTRUCTIONS,
-  EXPLORER_INSTRUCTIONS,
+  buildExplorerInstructions,
   MCP_GUIDANCE,
   OCR_GUIDANCE,
   PLAN_MODE_CONTEXT,
@@ -234,7 +234,14 @@ export {
 export type { ResolvedMedia, ResolvedBin, DownloadResult } from "./tools/ffmpegRuntime.js";
 export { registerAskTool, setQuestionHandler, parsePicks } from "./tools/ask.js";
 export type { QuestionHandler } from "./tools/ask.js";
-export { registerPlanTool, setPlanHandler } from "./tools/plan.js";
+export {
+  registerPlanTool,
+  setPlanHandler,
+  interpretPlanReply,
+  isAffirmativeText,
+  isRejectionText,
+} from "./tools/plan.js";
+export type { PlanReply } from "./tools/plan.js";
 export type { PlanHandler } from "./tools/plan.js";
 export {
   registerDirectoryTool,

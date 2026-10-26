@@ -87,6 +87,17 @@ const OVERFLOW_TRIM_FRACTION = 0.5;
 /** 压缩无进展后，至少新增这么多条消息才再次尝试预防性压缩 */
 const COMPACT_STALL_RETRY_DELTA = 20;
 
+/**
+ * 达到迭代上限时的收尾指令（仅 `finalizeOnMaxIterations` 生效）。
+ *
+ * 撞上限那一刻模型通常正处在「继续调用工具」的姿态，最后一条正文可能根本不存在：
+ * 子代理几十步的探索成果会因此全部作废。这里追加一段指令并**不提供任何工具**，
+ * 逼它把已收集到的信息写成结论。
+ */
+const FINALIZE_ON_LIMIT_PROMPT =
+  "已达到本轮迭代上限，你不能再调用任何工具。请立即基于上面已经收集到的信息输出最终报告：" +
+  "直接回答任务、给出结论与 path:line 引用，并明确说明哪些部分尚未查证。不要询问、不要继续探索。";
+
 /** TurnEngine 构造参数 */
 export interface TurnEngineOpts {
   /** LLM Provider（流式调用） */
@@ -103,6 +114,14 @@ export interface TurnEngineOpts {
   genSessionNamePrompt?: string;
   /** 单轮最大迭代次数（缺省用 DEFAULT_MAX_ITERATIONS） */
   maxIterations?: number;
+  /**
+   * 达到迭代上限后，是否再用一轮「不带工具」的调用让模型收尾总结。
+   *
+   * 只给子代理（explore）用：它的产出就是一份报告，半途而废等于白跑。
+   * 主代理撞上限通常意味着任务确实没做完，强行总结会给出似是而非的结论，
+   * 因此缺省关闭。
+   */
+  finalizeOnMaxIterations?: boolean;
   /**
    * 推理强度（可选）。透传给 Provider 的 LLM 请求参数
    * （OpenAI reasoning_effort；DeepSeek 自动跳过）。
@@ -344,6 +363,11 @@ export class TurnEngine {
   /** 推理强度（透传给 Provider；undefined = 使用模型默认） */
   private _reasoningEffort: ReasoningEffort | undefined;
 
+  /** 撞上限后是否再跑一轮收尾（见 TurnEngineOpts.finalizeOnMaxIterations） */
+  private _finalizeOnMaxIterations: boolean;
+  /** 收尾轮只跑一次（防止 yield* 被重入时反复总结） */
+  private _finalized = false;
+
   constructor(opts: TurnEngineOpts) {
     this.provider = opts.provider;
     this.registry = opts.registry;
@@ -353,6 +377,7 @@ export class TurnEngine {
     this.genSessionNamePrompt =
       opts.genSessionNamePrompt || GEN_SESSION_NAME_INSTRUCTIONS;
     this.maxIterations = opts.maxIterations ?? DEFAULT_MAX_ITERATIONS;
+    this._finalizeOnMaxIterations = opts.finalizeOnMaxIterations ?? false;
     this.messages = opts.messages ? [...opts.messages] : [];
     this._hook = opts.hook;
     this._contextWindow = opts.contextWindow;
@@ -654,6 +679,8 @@ export class TurnEngine {
    */
   private async *_loop(): AsyncGenerator<WsEvent> {
     let iterations = 0;
+    // run / retry / resume 都会进到这里：每进入一次循环就是新一轮，收尾只跑一次
+    this._finalized = false;
     /** 连续网络重试计数（一次成功调用后清零） */
     let netRetries = 0;
     const netMax = networkRetryMax();
@@ -661,6 +688,13 @@ export class TurnEngine {
     while (true) {
       // 最大迭代数检查
       if (iterations >= this.maxIterations) {
+        // 子代理：先让模型把已有发现写成报告，再结束（见 finalizeOnMaxIterations）
+        if (this._finalizeOnMaxIterations && !this._finalized) {
+          for await (const event of this._finalizeAtLimit(iterations)) {
+            yield event;
+          }
+          return;
+        }
         const files = this._buildProducedFiles();
 
         yield {
@@ -1121,6 +1155,124 @@ export class TurnEngine {
         this._steering = [];
       }
     }
+  }
+
+  /**
+   * 撞上限后的收尾轮（仅 finalizeOnMaxIterations）。
+   *
+   * 与正常迭代的区别只有两点：追加一条「停止探索、输出报告」的指令，
+   * 以及**不提供任何工具**（schemas 传空）。这样模型没有可调用的工具，
+   * 只能把已经读到的内容写成正文；正文会像正常轮次一样产出
+   * ASSISTANT_MESSAGE，explore 据此取到报告。
+   *
+   * 收尾轮失败不改变结束状态：已流出的正文照样交给调用方，比直接丢弃好。
+   */
+  private async *_finalizeAtLimit(iterations: number): AsyncGenerator<WsEvent> {
+    this._finalized = true;
+    this.messages.push({
+      role: "user",
+      content: FINALIZE_ON_LIMIT_PROMPT,
+      ts: Date.now(),
+      taskId: this.taskId,
+    });
+
+    const reqId = `llm_final_${Date.now()}_${genReqId()}`;
+    const logTime = new Date().toISOString();
+    let streamed = "";
+    let streamedThinking = "";
+    let usage: AssistantTurn["usage"] = null;
+
+    const llmReqData = {
+      reqId,
+      taskId: this.taskId,
+      logTime,
+      model: this.model,
+      msgCount: this._outboundMessages().length,
+      toolCount: 0,
+      finalize: true,
+    };
+    this._emitHook((h) => h.onEvent?.(EventType.LLM_REQUEST, llmReqData));
+    yield { type: EventType.LLM_REQUEST, data: llmReqData };
+
+    try {
+      this._llmAbort = new AbortController();
+      if (this._cancel) this._llmAbort.abort();
+      const chunks = await this.provider.stream(
+        this.model,
+        this._outboundMessages(),
+        [],
+        {
+          reqId,
+          logTime,
+          reasoningEffort: this._reasoningEffort,
+          signal: this._llmAbort.signal,
+        },
+      );
+      for await (const chunk of chunks) {
+        if (this._cancel) break;
+        if (chunk.content) {
+          streamed += chunk.content;
+          this._emitHook((h) => h.onAssistantDelta?.(chunk.content!));
+          yield {
+            type: EventType.ASSISTANT_DELTA,
+            data: { text: chunk.content, reqId, taskId: this.taskId },
+          };
+        }
+        if (chunk.reasoning) streamedThinking += chunk.reasoning;
+        if (chunk.usage) usage = chunk.usage;
+      }
+    } catch {
+      // 收尾轮失败（网络 / 溢出）：下面的 TURN_END 仍按上限结束，不额外报错
+    }
+
+    if (streamed) {
+      this.messages.push(
+        assistantMessage(
+          {
+            text: streamed,
+            toolCalls: [],
+            finishReason: "stop",
+            reasoning: streamedThinking || null,
+            usage,
+          },
+          this.model,
+          this.taskId,
+        ),
+      );
+      this._emitHook((h) =>
+        h.onAssistantMessage?.(streamed, [], usage ?? undefined),
+      );
+      yield {
+        type: EventType.ASSISTANT_MESSAGE,
+        data: {
+          text: streamed,
+          reasoning: streamedThinking || null,
+          tool_calls: [],
+          ...(usage ? { usage: { model: this.model, ...usage } } : {}),
+          reqId,
+          taskId: this.taskId,
+          logTime,
+          finalized: true,
+        },
+      };
+    }
+
+    const files = this._buildProducedFiles();
+    // 状态仍是 max_iterations_exceeded（如实反映「被上限截断」），
+    // finalized 表示报告已由收尾轮补全。
+    yield {
+      type: EventType.TURN_END,
+      data: {
+        taskId: this.taskId,
+        status: "max_iterations_exceeded",
+        iterations,
+        produced_files: files,
+        finalized: true,
+      },
+    };
+    this._emitHook((h) =>
+      h.onTurnEnd?.("max_iterations_exceeded", iterations, files),
+    );
   }
 
   // ===================== 工具执行 =====================

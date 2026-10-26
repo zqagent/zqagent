@@ -84,6 +84,7 @@ function buildEngine(opts: {
   script: StreamChunk[][];
   mode?: Mode;
   maxIterations?: number;
+  finalizeOnMaxIterations?: boolean;
   contextWindow?: number;
   softThresholdPct?: number;
   messages?: Message[];
@@ -119,6 +120,7 @@ function buildEngine(opts: {
     model: "test-model",
     instructions: "test system",
     maxIterations: opts.maxIterations ?? 10,
+    ...(opts.finalizeOnMaxIterations ? { finalizeOnMaxIterations: true } : {}),
     ...(opts.contextWindow !== undefined ? { contextWindow: opts.contextWindow } : {}),
     ...(opts.softThresholdPct !== undefined
       ? { softThresholdPct: opts.softThresholdPct }
@@ -433,6 +435,65 @@ describe("TurnEngine 异常与边界", () => {
     const end = events[events.length - 1];
     expect(end.type).toBe(EventType.TURN_END);
     expect(end.data.status).toBe("max_iterations_exceeded");
+  });
+});
+
+describe("迭代上限收尾（finalizeOnMaxIterations）", () => {
+  const loopScript = (): StreamChunk[][] => [
+    [toolChunk([{ id: "c1", name: "fake_tool", arguments: {} }])],
+    [toolChunk([{ id: "c2", name: "fake_tool", arguments: {} }])],
+  ];
+
+  it("撞上限后补跑一轮不带工具的调用，产出报告并标记 finalized", async () => {
+    const engine = buildEngine({
+      maxIterations: 2,
+      finalizeOnMaxIterations: true,
+      script: [...loopScript(), [textChunk("## 探索报告\n结论：已确认"), { ...textChunk(""), usage, finishReason: "stop" }]],
+    });
+
+    const events = await collect(engine, "loop");
+
+    const end = events[events.length - 1]!;
+    expect(end.type).toBe(EventType.TURN_END);
+    expect(end.data.status).toBe("max_iterations_exceeded");
+    expect(end.data.finalized).toBe(true);
+
+    const last = events.filter((e) => e.type === EventType.ASSISTANT_MESSAGE).at(-1)!;
+    expect(String(last.data.text)).toContain("探索报告");
+
+    // 收尾轮不带工具：模型只能写正文
+    const provider = engine.provider as unknown as { calls: number };
+    expect(provider.calls).toBe(3);
+  });
+
+  it("缺省关闭：主代理撞上限直接结束，不额外调用 LLM", async () => {
+    const engine = buildEngine({
+      maxIterations: 2,
+      // 多备一轮文本，若误启用收尾就会被消费掉
+      script: [...loopScript(), [textChunk("不该出现")]],
+    });
+
+    const events = await collect(engine, "loop");
+    const end = events[events.length - 1]!;
+
+    expect(end.data.status).toBe("max_iterations_exceeded");
+    expect(end.data.finalized).toBeUndefined();
+    const provider = engine.provider as unknown as { calls: number };
+    expect(provider.calls).toBe(2);
+  });
+
+  it("收尾轮没有任何输出时仍按上限结束", async () => {
+    const engine = buildEngine({
+      maxIterations: 2,
+      finalizeOnMaxIterations: true,
+      script: [...loopScript(), []],
+    });
+
+    const events = await collect(engine, "loop");
+    const end = events[events.length - 1]!;
+
+    expect(end.data.status).toBe("max_iterations_exceeded");
+    expect(end.data.finalized).toBe(true);
   });
 });
 

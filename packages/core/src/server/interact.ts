@@ -35,6 +35,8 @@ export function setupServerHandlers(manager: SessionManager): void {
     return {
       approved: parsed.approved ?? false,
       feedback: parsed.feedback,
+      // 补充要求（修订）与拒绝要区分开：前者要合并后重新提案，不是放弃方案
+      ...(parsed.revised ? { revised: true } : {}),
     };
   });
 

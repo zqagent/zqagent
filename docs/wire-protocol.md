@@ -95,12 +95,45 @@ sig = HMAC-SHA256(fleetSecret, encode(Envelope_without_sig))
 | 11 | `RESUME` | 终端 → 网关 | 断线续传（M5） |
 | 12 | `PING` / 13 `PONG` | 双向 | 应用层心跳 |
 | 14 | `AUTH_OK` | 网关 → 节点/终端 | `AuthOk`（握手结果；与 `AUTH` 分开以避免同类型双向的解析歧义） |
+| 15 | `TERMINAL` | 双向 | `TerminalData`（命令终端数据；**独立队列**，见 §3.6） |
 
 **M1 已实现的载荷**：`Envelope`（CMD）、`Ack`、`Status`、`Event`。
 **M2 已实现**：`Auth`/`AuthOk`（握手）、`Snapshot`/`NodeState`（替代 retained 的重建视图）、
 `Subscribe`/`Unsubscribe`（终端多路复用）、`Resume`（断线续传）、`Info`（能力/项目摘要）、
 `Notify`（审批/提问/回合完成）、`Envelope.timeout_ms`（执行预算 + 网关超时分级）。
 其余类型在 M5/M7 按需补 `.proto` 消息（新增消息向后兼容，无需改帧格式）。
+
+> 低 4 位的 16 个帧类型（0..=15）至此**全部占用**（`TERMINAL` 是最后一个）。
+> 再扩帧类型只能升协议版本号，因此 §1 的版本校验是后续演进的唯一闸门。
+
+## 3.6 TERMINAL：为什么终端数据不能复用 EVENT
+
+控制台「终端」面板需要一条**高频、可丢、双向**的字节流。最初考虑复用 `EVENT` + `CMD`，
+实现简单，但会把风险直接压到网关主链路上：
+
+| 复用 `EVENT`/`CMD` 的做法 | 后果（都有代码依据） |
+| --- | --- |
+| 终端输出走 `EVENT` 扇出 | 与心跳/ACK 共用每连接一条 `send_queue`（默认 64）。刷屏时 `PING` 的 `try_send` 失败 → 心跳发不出 → 整条连接被判死重连，**对话与审批一起断** |
+| 同上 | 每个节点事件环形缓冲只有 500 条（`GATEWAY_EVENT_BUFFER`），终端输出会把会话事件挤掉 |
+| 同上 | 配置 Redis 多副本时每条 EVENT 都 `bus.broadcast`，终端帧会线性放大集群内网流量 |
+| 终端按键走 `CMD` | 单节点 worker 严格串行、且要等 ACK 才处理下一个作业；一次慢指令后用户「打字没反应」，队列深 24 满后对话侧直接收到 `NodeBusy` |
+
+因此 `TERMINAL` 帧在网关有**独立的下行队列**（`GATEWAY_TERMINAL_QUEUE`，默认 256），
+并且**不**分配全局 `event_seq`、**不**入事件环形缓冲、**不**广播到跨副本总线：
+
+```
+节点 ──TERMINAL──▶ 网关 ──fanout_terminal()──▶ 终端的 terminal_tx（独立队列）
+终端 ──TERMINAL──▶ 网关 ──node_terminal_conn()──▶ 节点的 terminal_tx（独立队列）
+```
+
+队列满时的行为也被刻意区分：
+
+- 主队列满 → 累加 `dropped_frames`，连续超阈值会**逐出连接**（慢消费保护）；
+- 终端队列满 → 只累加 `terminal_drops_total`，回一帧 `kind=error`，**绝不逐出**。
+  丢一帧终端输出只是 xterm 少几行，不值得断开一条同时承载对话与审批的连接。
+
+验收方式：终端里跑 `yes` 刷屏，观察 `/metrics`——`terminal_drops_total` 上升属预期，
+只要 `dropped_frames_total`、`slow_evicted_total` 不动、`PING` 不丢，主链路就没受影响。
 
 ## 3.5 终端多路复用与快照所需的字段（M5）
 

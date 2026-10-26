@@ -108,10 +108,17 @@ export class SubagentHook implements EngineHook {
     this._line("│", `❌ ${error}`);
   }
 
-  onTurnEnd(status: string, _iterations: number, _producedFiles: string[]): void {
+  onTurnEnd(status: string, iterations: number, _producedFiles: string[]): void {
     if (!this._open) return;
     this._open = false;
-    this._line("└─", `${statusText(status)} · ${this._steps} 步`);
+    /*
+     * 同时给「轮次」与「工具次数」：两者不是一回事（一轮可并发多个工具），
+     * 只写「48 步」会让人误以为是迭代上限配错了。
+     */
+    this._line(
+      "└─",
+      `${statusText(status)} · ${iterations} 轮 / ${this._steps} 步（工具调用）`,
+    );
     this._emitReport();
     this._report = "";
   }

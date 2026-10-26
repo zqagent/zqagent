@@ -86,6 +86,7 @@ import {
 import { projectStats } from "../projectStats.js";
 import { buildNodeHost } from "../nodeHost.js";
 import type { SessionRecord, TenantConfig } from "../types.js";
+import type { TerminalManager } from "../terminals/TerminalManager.js";
 import type { FleetAckPayload, FleetCmdEnvelope } from "@zqagent/shared/fleet";
 import type { FleetCredential } from "@zqagent/shared/fleet";
 
@@ -217,6 +218,14 @@ export interface FleetDeps {
    * （非 SEA / 未被服务托管 / 未配置公钥，具体原因在 status().reason 里）。
    */
   getUpdater?: () => SelfUpdater | null;
+  /**
+   * 交互式终端管理器（控制台「终端」面板）。
+   *
+   * 只承载**低频**指令（列表 / 新建 / 回放 / 关闭 / 历史 / 设置）；
+   * 用户按键（input）与窗口尺寸（resize）走 `FrameType.TERMINAL` 独立通道，
+   * 不占这条单节点串行、每次都要等 ACK 的指令队列。
+   */
+  terminals?: TerminalManager | null;
 }
 
 /** `self_update` 需要的最小自更新能力（UpdateController 结构兼容） */
@@ -224,6 +233,19 @@ export interface SelfUpdater {
   status(): UpdaterStatus;
   inspect(): Promise<UpdateInspect>;
   requestInstall(force?: boolean): Promise<UpdateInstallStart>;
+}
+
+/** 终端指令：未启用终端能力时给出可读错误，而不是 TypeError */
+function requireTerminals(deps: FleetDeps): TerminalManager {
+  const terminals = deps.terminals;
+  if (!terminals) throw new ApiError(503, "unavailable", "本节点未启用终端功能");
+  return terminals;
+}
+
+function requireTerminalId(payload: Record<string, unknown>): string {
+  const id = String(payload.terminalId ?? "").trim();
+  if (!id) throw new ApiError(400, "bad_request", "缺少 terminalId");
+  return id;
 }
 
 function parseDecision(v: unknown): ApprovalOutcome {
@@ -820,6 +842,71 @@ export async function dispatchFleetCommand(
       case "list_shell_tasks": {
         const t = project();
         return ok({ tasks: listShellTasks(t.id) });
+      }
+
+      // ---------- 交互式终端（控制台「终端」面板） ----------
+      // 只处理低频控制动作；按键与 resize 走 FrameType.TERMINAL 独立通道
+      // （见 proto 的 TerminalData）：那条路不等 ACK、不占单节点串行队列。
+
+      case "terminal_list": {
+        const terminals = requireTerminals(deps);
+        const t = project();
+        return ok({ terminals: terminals.list(t.id) });
+      }
+
+      case "terminal_create": {
+        const terminals = requireTerminals(deps);
+        const t = project();
+        const label = typeof payload.label === "string" ? payload.label : undefined;
+        return ok({ terminal: await terminals.create({ projectId: t.id, label }) });
+      }
+
+      case "terminal_replay": {
+        const terminals = requireTerminals(deps);
+        const id = requireTerminalId(payload);
+        const meta = terminals.get(id);
+        if (!meta) throw new ApiError(404, "not_found", "终端不存在");
+        // 回放最近输出（≤200KB），让切页签 / 断线重连不必从空白开始
+        return ok({ meta, output: terminals.replayOutput(id) });
+      }
+
+      case "terminal_close": {
+        const terminals = requireTerminals(deps);
+        const meta = await terminals.close(requireTerminalId(payload));
+        if (!meta) throw new ApiError(404, "not_found", "终端不存在");
+        return ok({ terminal: meta });
+      }
+
+      case "terminal_remove": {
+        const terminals = requireTerminals(deps);
+        const removed = await terminals.remove(requireTerminalId(payload));
+        if (!removed) throw new ApiError(404, "not_found", "终端不存在");
+        return ok({ removed: true });
+      }
+
+      case "terminal_rename": {
+        const terminals = requireTerminals(deps);
+        const meta = await terminals.rename(
+          requireTerminalId(payload),
+          String(payload.label ?? ""),
+        );
+        if (!meta) throw new ApiError(400, "bad_request", "终端不存在或名称为空");
+        return ok({ terminal: meta });
+      }
+
+      case "terminal_history": {
+        const terminals = requireTerminals(deps);
+        const limit = typeof payload.limit === "number" ? payload.limit : undefined;
+        return ok({ records: await terminals.history(requireTerminalId(payload), { limit }) });
+      }
+
+      case "terminal_settings":
+        return ok({ settings: await requireTerminals(deps).settings() });
+
+      case "terminal_update_settings": {
+        const terminals = requireTerminals(deps);
+        const days = typeof payload.retentionDays === "number" ? payload.retentionDays : undefined;
+        return ok({ settings: await terminals.updateSettings({ retentionDays: days }) });
       }
 
       case "kill_shell_task": {

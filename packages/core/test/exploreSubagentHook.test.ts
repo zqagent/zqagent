@@ -18,6 +18,7 @@ import {
 } from "../src/index.js";
 import { ConsoleHook, displayWidth } from "../src/engine/ConsoleHook.js";
 import { buildExplorerEngine, makeExploreTool } from "../src/tools/explore.js";
+import { buildExplorerInstructions } from "../src/prompts/index.js";
 import type {
   StreamChunk,
   TokenUsage,
@@ -224,6 +225,37 @@ describe("SubagentHook 渲染", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("explore 撞上限后的收尾", () => {
+  it("用不带工具的一轮补出报告，并给出可操作的 note", async () => {
+    vi.stubEnv("EXPLORE_MAX_ITERATIONS", "2");
+    try {
+      const provider = new ScriptedProvider([
+        [toolChunk([{ id: "c1", name: "read_file", arguments: { path: "a.txt" } }])],
+        [toolChunk([{ id: "c2", name: "read_file", arguments: { path: "a.txt" } }])],
+        // 收尾轮：没有工具可用，模型只能写正文
+        [textChunk("## 收尾报告\n结论：a.txt 有两行")],
+      ]);
+      const explore = makeExploreTool({ workspace, provider, model: "test-model" });
+
+      const result = await explore({ task: "读 a.txt 并汇报" });
+
+      expect(result.error).toBeUndefined();
+      expect(String(result.report)).toContain("收尾报告");
+      expect(String(result.note)).toContain("已达探索上限");
+      expect(String(result.note)).toContain("EXPLORE_MAX_ITERATIONS");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("预算写进提示词，与实际上限一致", () => {
+    // 子代理不知道上限时会一路漫游到被截断，提示词必须给出这个数
+    const text = buildExplorerInstructions(30);
+    expect(text).toContain("最多有 30 轮");
+    expect(text).toContain("第 25 轮");
   });
 });
 
